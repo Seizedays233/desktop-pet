@@ -1,19 +1,22 @@
-@'
 **/bin/
 **/obj/
 **/publish/
+**/dist/
 **/package/
 **/package-arm64/
 **/package-arm64-fixed/
 **/package-linux/
+**/dmg-builder/
 **/.vs/
+**/.idea/
+dotnet-appdata/
 tools/
-dmg-builder/
 .DS_Store
+*.user
+*.suo
 *.exe
 *.dmg
 *.deb
 *.zip
 *.tar
 *.tar.gz
-'@ | Set-Content -Encoding UTF8 ".gitignore"
