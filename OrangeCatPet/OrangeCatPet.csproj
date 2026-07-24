@@ -1,0 +1,39 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <UseWPF>true</UseWPF>
+    <TargetPlatformMoniker>Windows,Version=7.0</TargetPlatformMoniker>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <AssemblyName>OrangeCatPet</AssemblyName>
+    <RootNamespace>OrangeCatPet</RootNamespace>
+    <ApplicationIcon>Assets/cat.ico</ApplicationIcon>
+    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+    <SelfContained>true</SelfContained>
+    <PublishSingleFile>true</PublishSingleFile>
+    <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
+    <EnableCompressionInSingleFile>true</EnableCompressionInSingleFile>
+    <DebugType>none</DebugType>
+    <DebugSymbols>false</DebugSymbols>
+  </PropertyGroup>
+  <ItemGroup>
+    <EmbeddedResource Include="Assets/cat-smooth-idle-v2.png" LogicalName="OrangeCatPet.Assets.cat-smooth-idle-v2.png" />
+    <EmbeddedResource Include="Assets/cat-smooth-blink-v2.png" LogicalName="OrangeCatPet.Assets.cat-smooth-blink-v2.png" />
+    <EmbeddedResource Include="Assets/cat-smooth-walk-??.png" LogicalName="OrangeCatPet.Assets.%(Filename)%(Extension)" />
+    <EmbeddedResource Include="Assets/cat-smooth-groom-??.png" LogicalName="OrangeCatPet.Assets.%(Filename)%(Extension)" />
+    <EmbeddedResource Include="Assets/cat-smooth-scratch-v2-??.png" LogicalName="OrangeCatPet.Assets.%(Filename)%(Extension)" />
+    <EmbeddedResource Include="Assets/cat-smooth-sleep-v2-??.png" LogicalName="OrangeCatPet.Assets.%(Filename)%(Extension)" />
+    <EmbeddedResource Include="Assets/cat-smooth-pat-seated-??.png" LogicalName="OrangeCatPet.Assets.%(Filename)%(Extension)" />
+    <EmbeddedResource Include="Assets/cat-smooth-feed-??.png" LogicalName="OrangeCatPet.Assets.%(Filename)%(Extension)" />
+    <EmbeddedResource Include="Assets/cat-smooth-feed-can-??.png" LogicalName="OrangeCatPet.Assets.%(Filename)%(Extension)" />
+    <EmbeddedResource Include="Assets/cat-smooth-feed-chicken-??.png" LogicalName="OrangeCatPet.Assets.%(Filename)%(Extension)" />
+  </ItemGroup>
+</Project>
+
+
+
+
+
+
+

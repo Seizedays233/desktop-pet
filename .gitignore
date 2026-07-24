@@ -1,0 +1,19 @@
+@'
+**/bin/
+**/obj/
+**/publish/
+**/package/
+**/package-arm64/
+**/package-arm64-fixed/
+**/package-linux/
+**/.vs/
+tools/
+dmg-builder/
+.DS_Store
+*.exe
+*.dmg
+*.deb
+*.zip
+*.tar
+*.tar.gz
+'@ | Set-Content -Encoding UTF8 ".gitignore"

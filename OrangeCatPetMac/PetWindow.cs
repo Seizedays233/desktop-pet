@@ -1,0 +1,1145 @@
+using System.Runtime.InteropServices;
+using Avalonia;
+using Avalonia.Controls;
+using Avalonia.Controls.Primitives;
+using Avalonia.Input;
+using Avalonia.Media;
+using Avalonia.Media.Imaging;
+using Avalonia.Platform;
+using Avalonia.Threading;
+
+namespace OrangeCatPetMac;
+
+internal sealed class PetWindow : Window
+{
+    private enum IdleActionState
+    {
+        None,
+        Grooming,
+        Scratching,
+        Sleeping,
+        Feeding,
+        Petting
+    }
+
+    private enum FoodKind
+    {
+        DriedFish,
+        CannedFood,
+        Chicken
+    }
+
+    private const double BaseWidth = 280;
+    private const double BaseHeight = 330;
+    private const double StartFollowingDistance = 155;
+    private const double StopFollowingDistance = 105;
+    private const int AnimationFrameCount = 8;
+
+    private static readonly string[] GreetingMessages =
+    {
+        "\u55e8\uff5e\u4eca\u5929\u4e5f\u8981\u5f00\u5fc3\u5594\uff01",
+        "\u563f\uff01\u4f60\u7ec8\u4e8e\u6765\u770b\u6211\u5566\uff5e",
+        "\u4eca\u5929\u8fc7\u5f97\u600e\u4e48\u6837\uff1f",
+        "\u6211\u4f1a\u4e56\u4e56\u966a\u7740\u4f60\u7684\u3002",
+        "\u5fd9\u5b8c\u8bb0\u5f97\u4f11\u606f\u4e00\u4e0b\u54e6\uff01",
+        "\u89c1\u5230\u4f60\u771f\u597d\uff5e",
+        "\u8981\u4e0d\u8981\u966a\u6211\u73a9\u4e00\u4f1a\u513f\uff1f",
+        "\u55b5\u545c\uff5e\u9001\u4f60\u4e00\u4e2a\u597d\u5fc3\u60c5\uff01"
+    };
+
+    private readonly Random _random = new();
+    private readonly Border _speechBubble;
+    private readonly TextBlock _speechText;
+    private readonly Image _catImage;
+    private readonly Bitmap _idleSprite;
+    private readonly Bitmap _blinkSprite;
+    private readonly Bitmap[] _groomSprites;
+    private readonly Bitmap[] _scratchSprites;
+    private readonly Bitmap[] _sleepSprites;
+    private readonly Bitmap[] _walkingSprites;
+    private readonly Bitmap[] _pettingSprites;
+    private readonly Bitmap[] _fishFeedingSprites;
+    private readonly Bitmap[] _cannedFoodFeedingSprites;
+    private readonly Bitmap[] _chickenFeedingSprites;
+    private readonly ScaleTransform _facingTransform = new(1, 1);
+    private readonly ScaleTransform _breathingTransform = new(1, 1);
+    private readonly ScaleTransform _reactionTransform = new(1, 1);
+    private readonly RotateTransform _lookTransform = new();
+    private readonly TranslateTransform _lookOffsetTransform = new();
+    private readonly TranslateTransform _stepTransform = new();
+    private readonly DispatcherTimer _motionTimer;
+    private readonly DispatcherTimer _roamTimer;
+    private readonly DispatcherTimer _blinkTimer;
+    private readonly DispatcherTimer _blinkRestoreTimer;
+    private readonly DispatcherTimer _speechTimer;
+    private readonly DispatcherTimer _idleActionTimer;
+    private readonly DispatcherTimer _reactionTimer;
+    private readonly MenuItem _followMouseMenuItem;
+    private readonly MenuItem _roamMenuItem;
+    private readonly MenuItem _topmostMenuItem;
+    private readonly ContextMenu _foodMenu;
+    private readonly Dictionary<double, MenuItem> _sizeMenuItems = new();
+    private readonly Queue<DateTime> _recentFeedings = new();
+
+    private PixelPoint _pointerDownScreen;
+    private PixelPoint _windowAtPointerDown;
+    private PixelPoint _roamTarget;
+    private bool _hasRoamTarget;
+    private bool _pointerCaptured;
+    private bool _dragging;
+    private bool _doubleClick;
+    private bool _isWalking;
+    private bool _isBlinking;
+    private int _walkFrameIndex;
+    private double _velocityX;
+    private double _velocityY;
+    private DateTime _walkCycleStarted = DateTime.MinValue;
+    private DateTime _followPausedUntil = DateTime.MinValue;
+    private DateTime _roamRestUntil = DateTime.MinValue;
+    private DateTime _nextIdleActionAt = DateTime.MaxValue;
+    private DateTime _idleActionStarted = DateTime.MinValue;
+    private DateTime _idleActionEnds = DateTime.MinValue;
+    private IdleActionState _idleAction = IdleActionState.None;
+    private Bitmap[]? _activeInteractionSprites;
+
+    public PetWindow()
+    {
+        Title = $"\u674e\u6a58 \u00b7 {GetPlatformLabel()}";
+        Width = BaseWidth;
+        Height = BaseHeight;
+        SystemDecorations = SystemDecorations.None;
+        TransparencyLevelHint = new[] { WindowTransparencyLevel.Transparent };
+        Background = Brushes.Transparent;
+        CanResize = false;
+        ShowInTaskbar = false;
+        Topmost = true;
+
+        _idleSprite = LoadSprite("cat-smooth-idle-v2.png");
+        _blinkSprite = LoadSprite("cat-smooth-blink-v2.png");
+        _groomSprites = LoadSpriteSequence("smooth-groom");
+        _scratchSprites = LoadSpriteSequence("smooth-scratch-v2");
+        _sleepSprites = LoadSpriteSequence("smooth-sleep-v2");
+        _walkingSprites = LoadSpriteSequence("smooth-walk");
+        _pettingSprites = LoadSpriteSequence("smooth-pat-seated");
+        _fishFeedingSprites = LoadSpriteSequence("smooth-feed");
+        _cannedFoodFeedingSprites = LoadSpriteSequence("smooth-feed-can");
+        _chickenFeedingSprites = LoadSpriteSequence("smooth-feed-chicken");
+
+        var root = new Grid
+        {
+            RowDefinitions = new RowDefinitions("78,*")
+        };
+
+        _speechText = new TextBlock
+        {
+            TextAlignment = TextAlignment.Center,
+            TextWrapping = TextWrapping.Wrap,
+            FontFamily = new FontFamily("PingFang SC"),
+            FontSize = 14,
+            Foreground = new SolidColorBrush(Color.FromRgb(83, 54, 34)),
+            MaxWidth = 230
+        };
+
+        _speechBubble = new Border
+        {
+            Background = new SolidColorBrush(Color.FromArgb(246, 255, 252, 245)),
+            BorderBrush = new SolidColorBrush(Color.FromArgb(220, 231, 168, 103)),
+            BorderThickness = new Thickness(2),
+            CornerRadius = new CornerRadius(18),
+            Padding = new Thickness(14, 9),
+            Margin = new Thickness(12, 5, 12, 6),
+            HorizontalAlignment = Avalonia.Layout.HorizontalAlignment.Center,
+            VerticalAlignment = Avalonia.Layout.VerticalAlignment.Center,
+            Child = _speechText,
+            Opacity = 0,
+            IsHitTestVisible = false
+        };
+        Grid.SetRow(_speechBubble, 0);
+
+        var transforms = new TransformGroup();
+        transforms.Children.Add(_facingTransform);
+        transforms.Children.Add(_breathingTransform);
+        transforms.Children.Add(_reactionTransform);
+        transforms.Children.Add(_lookTransform);
+        transforms.Children.Add(_lookOffsetTransform);
+        transforms.Children.Add(_stepTransform);
+
+        _catImage = new Image
+        {
+            Source = _idleSprite,
+            Stretch = Stretch.Uniform,
+            Margin = new Thickness(8, 0),
+            HorizontalAlignment = Avalonia.Layout.HorizontalAlignment.Stretch,
+            VerticalAlignment = Avalonia.Layout.VerticalAlignment.Stretch,
+            RenderTransformOrigin = new RelativePoint(0.5, 0.72, RelativeUnit.Relative),
+            RenderTransform = transforms,
+            Cursor = new Cursor(StandardCursorType.Hand)
+        };
+        ToolTip.SetTip(_catImage, "\u5355\u51fb\u629a\u6478 \u00b7 \u53cc\u51fb\u5582\u98df \u00b7 \u62d6\u52a8\u79fb\u52a8 \u00b7 \u53f3\u952e\u83dc\u5355");
+        Grid.SetRow(_catImage, 1);
+
+        root.Children.Add(_speechBubble);
+        root.Children.Add(_catImage);
+        Content = root;
+
+        _followMouseMenuItem = CreateCheckMenuItem("\u8ddf\u968f\u9f20\u6807", false);
+        _followMouseMenuItem.Click += (_, _) =>
+        {
+            _hasRoamTarget = false;
+            if (_followMouseMenuItem.IsChecked == true)
+            {
+                EndIdleAction();
+                _followPausedUntil = DateTime.UtcNow.AddSeconds(1);
+                Say("\u6211\u6765\u8ffd\u4f60\u5566\uff01");
+            }
+            else
+            {
+                StopWalking();
+                Say("\u6211\u5148\u5728\u8fd9\u91cc\u5f85\u7740\uff5e");
+            }
+            UpdateMotionTimerState();
+        };
+
+        _roamMenuItem = CreateCheckMenuItem("\u81ea\u52a8\u6563\u6b65\uff08\u8d70\u8d70\u505c\u505c\uff09", false);
+        _roamMenuItem.Click += (_, _) =>
+        {
+            _hasRoamTarget = false;
+            if (_roamMenuItem.IsChecked == true)
+            {
+                _roamRestUntil = DateTime.UtcNow.AddSeconds(2 + _random.NextDouble() * 3);
+                ScheduleNextIdleAction(1, 3);
+            }
+            else
+            {
+                StopWalking();
+            }
+            UpdateMotionTimerState();
+        };
+
+        _topmostMenuItem = CreateCheckMenuItem("\u59cb\u7ec8\u7f6e\u9876", true);
+        _topmostMenuItem.Click += (_, _) => Topmost = _topmostMenuItem.IsChecked == true;
+
+        _catImage.ContextMenu = BuildContextMenu();
+        _foodMenu = BuildFoodMenu();
+        _catImage.PointerPressed += OnCatPointerPressed;
+        _catImage.PointerMoved += OnCatPointerMoved;
+        _catImage.PointerReleased += OnCatPointerReleased;
+        _catImage.PointerWheelChanged += OnCatPointerWheelChanged;
+
+        _motionTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(33) };
+        _motionTimer.Tick += (_, _) => UpdateMotion();
+        _roamTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(1) };
+        _roamTimer.Tick += (_, _) => SelectRoamTarget();
+        _blinkTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(3.2) };
+        _blinkTimer.Tick += (_, _) => Blink();
+        _blinkRestoreTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(180) };
+        _blinkRestoreTimer.Tick += (_, _) => EndBlink();
+        _speechTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(2.3) };
+        _speechTimer.Tick += (_, _) => HideSpeech();
+        _idleActionTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(50) };
+        _idleActionTimer.Tick += (_, _) => UpdateIdleAction();
+        _reactionTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(190) };
+        _reactionTimer.Tick += (_, _) => EndReaction();
+
+        Opened += OnOpened;
+        Closed += (_, _) => StopAllTimers();
+    }
+
+    private static MenuItem CreateCheckMenuItem(string header, bool isChecked)
+    {
+        return new MenuItem
+        {
+            Header = header,
+            ToggleType = MenuItemToggleType.CheckBox,
+            IsChecked = isChecked
+        };
+    }
+
+    private static Bitmap LoadSprite(string assetName)
+    {
+        var uri = new Uri($"avares://LiJuPet/Assets/{assetName}");
+        return new Bitmap(AssetLoader.Open(uri));
+    }
+
+    private static Bitmap[] LoadSpriteSequence(string action)
+    {
+        return Enumerable.Range(1, AnimationFrameCount)
+            .Select(index => LoadSprite($"cat-{action}-{index:00}.png"))
+            .ToArray();
+    }
+
+    private ContextMenu BuildContextMenu()
+    {
+        var menu = new ContextMenu { FontFamily = new FontFamily("PingFang SC") };
+        var greetItem = new MenuItem { Header = "\u6253\u4e2a\u62db\u547c" };
+        greetItem.Click += (_, _) =>
+        {
+            React();
+            Say(GreetingMessages[_random.Next(GreetingMessages.Length)]);
+        };
+
+        var feedMenu = new MenuItem { Header = "\u6295\u5582" };
+        AddFoodItems(feedMenu);
+
+        var sizeMenu = new MenuItem { Header = "\u5927\u5c0f" };
+        AddSizeItem(sizeMenu, "\u5c0f", 0.78);
+        AddSizeItem(sizeMenu, "\u4e2d", 1.0);
+        AddSizeItem(sizeMenu, "\u5927", 1.28);
+        _sizeMenuItems[1.0].IsChecked = true;
+
+        var homeItem = new MenuItem { Header = "\u56de\u5230\u53f3\u4e0b\u89d2" };
+        homeItem.Click += (_, _) =>
+        {
+            _hasRoamTarget = false;
+            PositionAtBottomRight();
+            Say("\u6211\u56de\u6765\u5566\uff01");
+        };
+
+        var exitItem = new MenuItem { Header = "\u9000\u51fa" };
+        exitItem.Click += (_, _) => Close();
+
+        menu.Items.Add(greetItem);
+        menu.Items.Add(feedMenu);
+        menu.Items.Add(new Separator());
+        menu.Items.Add(_followMouseMenuItem);
+        menu.Items.Add(_roamMenuItem);
+        menu.Items.Add(_topmostMenuItem);
+        menu.Items.Add(sizeMenu);
+        menu.Items.Add(homeItem);
+        menu.Items.Add(new Separator());
+        menu.Items.Add(exitItem);
+        return menu;
+    }
+
+    private ContextMenu BuildFoodMenu()
+    {
+        var menu = new ContextMenu
+        {
+            FontFamily = new FontFamily("PingFang SC"),
+            Placement = PlacementMode.Pointer
+        };
+        AddFoodItems(menu);
+        return menu;
+    }
+
+    private void AddFoodItems(ItemsControl parent)
+    {
+        AddFoodItem(parent, "\u5c0f\u9c7c\u5e72", FoodKind.DriedFish);
+        AddFoodItem(parent, "\u732b\u7f50\u5934", FoodKind.CannedFood);
+        AddFoodItem(parent, "\u9e21\u8089", FoodKind.Chicken);
+    }
+
+    private void AddFoodItem(ItemsControl parent, string label, FoodKind food)
+    {
+        var item = new MenuItem { Header = label };
+        item.Click += (_, _) => BeginFeeding(food);
+        parent.Items.Add(item);
+    }
+
+    private void AddSizeItem(MenuItem parent, string label, double scale)
+    {
+        var item = CreateCheckMenuItem(label, false);
+        item.Click += (_, _) => SetPetSize(scale);
+        _sizeMenuItems.Add(scale, item);
+        parent.Items.Add(item);
+    }
+
+    private void ShowFoodMenu()
+    {
+        if (_idleAction == IdleActionState.Feeding)
+        {
+            return;
+        }
+
+        Say("\u4eca\u5929\u60f3\u5403\u4ec0\u4e48\uff1f", 1.8);
+        _foodMenu.Open(_catImage);
+    }
+
+    private void OnOpened(object? sender, EventArgs e)
+    {
+        PositionAtBottomRight();
+        UpdateMotionTimerState();
+        _roamRestUntil = DateTime.UtcNow.AddSeconds(3);
+        ScheduleNextIdleAction(5, 10);
+        _roamTimer.Start();
+        _blinkTimer.Start();
+        _idleActionTimer.Start();
+
+        var introTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(450) };
+        introTimer.Tick += (_, _) =>
+        {
+            introTimer.Stop();
+            Say("\u95f2\u7740\u4f1a\u8214\u6bdb\u3001\u6320\u75d2\u548c\u7761\u89c9\uff1b\u53f3\u952e\u53ef\u5f00\u542f\u8d70\u8d70\u505c\u505c\uff5e", 5.2);
+        };
+        introTimer.Start();
+    }
+
+    private void UpdateMotionTimerState()
+    {
+        if (_followMouseMenuItem.IsChecked == true || _roamMenuItem.IsChecked == true)
+        {
+            _motionTimer.Start();
+        }
+        else
+        {
+            _motionTimer.Stop();
+            StopWalking();
+            RelaxLook();
+        }
+    }
+
+    private void UpdateMotion()
+    {
+        if (_pointerCaptured || _foodMenu.IsOpen || _catImage.ContextMenu?.IsOpen == true)
+        {
+            StopWalking();
+            RelaxLook();
+            return;
+        }
+
+        PixelPoint target = default;
+        var hasTarget = false;
+        var scale = RenderScaling;
+        var centerOffsetY = (78 + Math.Max(0, Height - 78) * 0.52) * scale;
+        var pixelWidth = Width * scale;
+        var pixelHeight = Height * scale;
+        var workArea = CurrentWorkArea();
+
+        if (_followMouseMenuItem.IsChecked == true && DateTime.UtcNow >= _followPausedUntil)
+        {
+            var cursor = GetGlobalCursorPosition();
+            target = new PixelPoint(
+                (int)Clamp(cursor.X, workArea.X + pixelWidth / 2, workArea.Right - pixelWidth / 2),
+                (int)Clamp(cursor.Y, workArea.Y + centerOffsetY, workArea.Bottom - pixelHeight + centerOffsetY));
+            hasTarget = true;
+        }
+        else if (_followMouseMenuItem.IsChecked != true &&
+                 _roamMenuItem.IsChecked == true &&
+                 _hasRoamTarget)
+        {
+            target = _roamTarget;
+            hasTarget = true;
+        }
+
+        if (!hasTarget)
+        {
+            StopWalking();
+            if (_idleAction == IdleActionState.None)
+            {
+                RelaxLook();
+            }
+            return;
+        }
+
+        var catCenterX = Position.X + pixelWidth / 2;
+        var catCenterY = Position.Y + centerOffsetY;
+        var deltaX = target.X - catCenterX;
+        var deltaY = target.Y - catCenterY;
+        var distance = Math.Sqrt(deltaX * deltaX + deltaY * deltaY);
+        UpdateLook(deltaX, deltaY);
+
+        var movementThreshold = (_isWalking ? StopFollowingDistance : StartFollowingDistance) * scale;
+        if (distance <= movementThreshold)
+        {
+            var wasWalking = _isWalking;
+            Decelerate();
+            if (_followMouseMenuItem.IsChecked != true && !_isWalking && (wasWalking || _hasRoamTarget))
+            {
+                BeginRoamRest();
+            }
+            return;
+        }
+
+        var desiredSpeed = Clamp((distance - StopFollowingDistance * scale) * 0.09, 3.2 * scale, 16.5 * scale);
+        var desiredVelocityX = deltaX / distance * desiredSpeed;
+        var desiredVelocityY = deltaY / distance * desiredSpeed;
+        _velocityX += (desiredVelocityX - _velocityX) * 0.18;
+        _velocityY += (desiredVelocityY - _velocityY) * 0.18;
+
+        var oldPosition = Position;
+        Position = new PixelPoint(
+            (int)Math.Round(Position.X + _velocityX),
+            (int)Math.Round(Position.Y + _velocityY));
+        ClampToWorkArea();
+
+        if (Math.Abs(Position.X - oldPosition.X) + Math.Abs(Position.Y - oldPosition.Y) < 1)
+        {
+            StopWalking();
+            if (_followMouseMenuItem.IsChecked == true)
+            {
+                _hasRoamTarget = false;
+            }
+            else
+            {
+                BeginRoamRest();
+            }
+            return;
+        }
+
+        _facingTransform.ScaleX = deltaX >= 0 ? 1 : -1;
+        SetWalkingFrame();
+    }
+
+    private void Decelerate()
+    {
+        _velocityX *= 0.68;
+        _velocityY *= 0.68;
+        if (Math.Abs(_velocityX) + Math.Abs(_velocityY) < 0.35)
+        {
+            StopWalking();
+            return;
+        }
+
+        Position = new PixelPoint(
+            (int)Math.Round(Position.X + _velocityX),
+            (int)Math.Round(Position.Y + _velocityY));
+        ClampToWorkArea();
+        SetWalkingFrame();
+    }
+
+    private void UpdateLook(double deltaX, double deltaY)
+    {
+        var targetAngle = Clamp(deltaX / 55, -6.5, 6.5);
+        _lookTransform.Angle += (targetAngle - _lookTransform.Angle) * 0.18;
+        var targetOffsetX = Clamp(deltaX / 95, -4.2, 4.2);
+        var targetOffsetY = Clamp(deltaY / 110, -3.2, 3.2);
+        _lookOffsetTransform.X += (targetOffsetX - _lookOffsetTransform.X) * 0.18;
+        _lookOffsetTransform.Y += (targetOffsetY - _lookOffsetTransform.Y) * 0.18;
+    }
+
+    private void RelaxLook()
+    {
+        _lookTransform.Angle *= 0.88;
+        _lookOffsetTransform.X *= 0.88;
+        _lookOffsetTransform.Y *= 0.88;
+    }
+
+    private void SetWalkingFrame()
+    {
+        EndIdleAction();
+        var now = DateTime.UtcNow;
+        if (!_isWalking)
+        {
+            _isWalking = true;
+            _walkCycleStarted = now;
+            _walkFrameIndex = 0;
+            _catImage.Source = _walkingSprites[0];
+        }
+
+        _isBlinking = false;
+        _blinkRestoreTimer.Stop();
+        var elapsedMilliseconds = (now - _walkCycleStarted).TotalMilliseconds;
+        const double walkingFrameMilliseconds = 120;
+        var cycleDuration = walkingFrameMilliseconds * _walkingSprites.Length;
+        var cycleProgress = (elapsedMilliseconds % cycleDuration) / cycleDuration;
+        var frameIndex = (int)(elapsedMilliseconds / walkingFrameMilliseconds) % _walkingSprites.Length;
+        if (frameIndex != _walkFrameIndex)
+        {
+            _walkFrameIndex = frameIndex;
+            _catImage.Source = _walkingSprites[_walkFrameIndex];
+        }
+
+        var phase = Math.PI * 2 * cycleProgress;
+        _stepTransform.Y = -0.8 + Math.Sin(phase) * 2;
+        _stepTransform.X = Math.Cos(phase) * 0.65;
+    }
+
+    private void StopWalking()
+    {
+        _velocityX = 0;
+        _velocityY = 0;
+        if (!_isWalking)
+        {
+            return;
+        }
+
+        _isWalking = false;
+        _walkFrameIndex = 0;
+        _walkCycleStarted = DateTime.MinValue;
+        _stepTransform.X = 0;
+        _stepTransform.Y = 0;
+        if (!_isBlinking)
+        {
+            _catImage.Source = _idleSprite;
+        }
+    }
+
+    private void BeginRoamRest()
+    {
+        _hasRoamTarget = false;
+        _roamRestUntil = DateTime.UtcNow.AddSeconds(8 + _random.NextDouble() * 12);
+        ScheduleNextIdleAction(1.5, 4);
+    }
+
+    private void SelectRoamTarget()
+    {
+        if (_followMouseMenuItem.IsChecked == true ||
+            _roamMenuItem.IsChecked != true ||
+            _pointerCaptured ||
+            _isWalking ||
+            _hasRoamTarget ||
+            _idleAction != IdleActionState.None ||
+            DateTime.UtcNow < _roamRestUntil)
+        {
+            return;
+        }
+
+        var area = CurrentWorkArea();
+        var scale = RenderScaling;
+        var centerOffsetY = (78 + Math.Max(0, Height - 78) * 0.52) * scale;
+        var pixelWidth = Width * scale;
+        var pixelHeight = Height * scale;
+        var catCenterX = Position.X + pixelWidth / 2;
+        var catCenterY = Position.Y + centerOffsetY;
+        var minimumX = area.X + pixelWidth / 2;
+        var maximumX = area.Right - pixelWidth / 2;
+        var minimumY = area.Y + centerOffsetY;
+        var maximumY = area.Bottom - pixelHeight + centerOffsetY;
+
+        var goRight = _random.Next(2) == 0;
+        var availableRoom = goRight ? maximumX - catCenterX : catCenterX - minimumX;
+        var oppositeRoom = goRight ? catCenterX - minimumX : maximumX - catCenterX;
+        if (availableRoom < 180 * scale && oppositeRoom > availableRoom)
+        {
+            goRight = !goRight;
+            availableRoom = oppositeRoom;
+        }
+
+        var travelDistance = Math.Min(availableRoom, (200 + _random.NextDouble() * 320) * scale);
+        var targetX = catCenterX + (goRight ? travelDistance : -travelDistance);
+        var targetY = Clamp(catCenterY + _random.Next(-70, 71) * scale, minimumY, maximumY);
+        _roamTarget = new PixelPoint(
+            (int)Clamp(targetX, minimumX, maximumX),
+            (int)targetY);
+        _hasRoamTarget = true;
+    }
+
+    private void ScheduleNextIdleAction(double minimumSeconds, double maximumSeconds)
+    {
+        _nextIdleActionAt = DateTime.UtcNow.AddSeconds(
+            minimumSeconds + _random.NextDouble() * Math.Max(0, maximumSeconds - minimumSeconds));
+    }
+
+    private void UpdateIdleAction()
+    {
+        var now = DateTime.UtcNow;
+        if (_idleAction == IdleActionState.None)
+        {
+            _breathingTransform.ScaleY = 1 + Math.Sin(now.TimeOfDay.TotalSeconds * 2.8) * 0.014;
+            if (now >= _nextIdleActionAt &&
+                !_isWalking &&
+                !_isBlinking &&
+                !_pointerCaptured &&
+                !_hasRoamTarget &&
+                !_foodMenu.IsOpen &&
+                _catImage.ContextMenu?.IsOpen != true)
+            {
+                StartRandomIdleAction();
+            }
+            return;
+        }
+
+        _breathingTransform.ScaleY = 1;
+        if (_isWalking || _pointerCaptured || now >= _idleActionEnds)
+        {
+            EndIdleAction();
+            return;
+        }
+
+        var elapsedSeconds = (now - _idleActionStarted).TotalSeconds;
+        switch (_idleAction)
+        {
+            case IdleActionState.Grooming:
+                SetAnimationFrame(_groomSprites, elapsedSeconds, 7, true, true);
+                break;
+            case IdleActionState.Scratching:
+                SetAnimationFrame(_scratchSprites, elapsedSeconds, 7, true, false);
+                break;
+            case IdleActionState.Sleeping:
+                SetAnimationFrame(_sleepSprites, elapsedSeconds, 2.5, true, false);
+                break;
+            case IdleActionState.Feeding:
+                if (_activeInteractionSprites != null)
+                {
+                    SetAnimationFrame(_activeInteractionSprites, elapsedSeconds, 7.5, false, false);
+                }
+                break;
+            case IdleActionState.Petting:
+                if (_activeInteractionSprites != null)
+                {
+                    SetAnimationFrame(_activeInteractionSprites, elapsedSeconds, 7, false, false);
+                }
+                break;
+        }
+    }
+
+    private void SetAnimationFrame(
+        Bitmap[] sprites,
+        double elapsedSeconds,
+        double framesPerSecond,
+        bool loop,
+        bool pingPong)
+    {
+        var rawIndex = (int)(elapsedSeconds * framesPerSecond);
+        int frameIndex;
+        if (!loop)
+        {
+            frameIndex = Math.Min(sprites.Length - 1, rawIndex);
+        }
+        else if (pingPong && sprites.Length > 1)
+        {
+            var cycleLength = sprites.Length * 2 - 2;
+            var cycleIndex = rawIndex % cycleLength;
+            frameIndex = cycleIndex < sprites.Length ? cycleIndex : cycleLength - cycleIndex;
+        }
+        else
+        {
+            frameIndex = rawIndex % sprites.Length;
+        }
+
+        if (!ReferenceEquals(_catImage.Source, sprites[frameIndex]))
+        {
+            _catImage.Source = sprites[frameIndex];
+        }
+    }
+
+    private void StartRandomIdleAction()
+    {
+        _blinkRestoreTimer.Stop();
+        _isBlinking = false;
+        _idleActionStarted = DateTime.UtcNow;
+        var selection = _random.NextDouble();
+        if (selection < 0.44)
+        {
+            _idleAction = IdleActionState.Grooming;
+            _idleActionEnds = _idleActionStarted.AddSeconds(5 + _random.NextDouble() * 3);
+            _catImage.Source = _groomSprites[0];
+        }
+        else if (selection < 0.74)
+        {
+            _idleAction = IdleActionState.Scratching;
+            _idleActionEnds = _idleActionStarted.AddSeconds(3.5 + _random.NextDouble() * 2.5);
+            _catImage.Source = _scratchSprites[0];
+        }
+        else
+        {
+            _idleAction = IdleActionState.Sleeping;
+            _idleActionEnds = _idleActionStarted.AddSeconds(12 + _random.NextDouble() * 10);
+            _catImage.Source = _sleepSprites[0];
+        }
+    }
+
+    private void EndIdleAction()
+    {
+        if (_idleAction == IdleActionState.None)
+        {
+            return;
+        }
+
+        _idleAction = IdleActionState.None;
+        _activeInteractionSprites = null;
+        _idleActionStarted = DateTime.MinValue;
+        _idleActionEnds = DateTime.MinValue;
+        _stepTransform.X = 0;
+        _stepTransform.Y = 0;
+        _lookTransform.Angle = 0;
+        _lookOffsetTransform.X = 0;
+        _lookOffsetTransform.Y = 0;
+        if (!_isWalking)
+        {
+            _catImage.Source = _idleSprite;
+        }
+        ScheduleNextIdleAction(7, 16);
+    }
+
+    private void Blink()
+    {
+        _blinkTimer.Interval = TimeSpan.FromSeconds(2.8 + _random.NextDouble() * 3.2);
+        if (_isWalking || _pointerCaptured || _idleAction != IdleActionState.None)
+        {
+            return;
+        }
+
+        _isBlinking = true;
+        _catImage.Source = _blinkSprite;
+        _blinkRestoreTimer.Stop();
+        _blinkRestoreTimer.Interval = TimeSpan.FromMilliseconds(180);
+        _blinkRestoreTimer.Start();
+    }
+
+    private void EndBlink()
+    {
+        _blinkRestoreTimer.Stop();
+        _isBlinking = false;
+        _catImage.Source = _isWalking ? _walkingSprites[_walkFrameIndex] : _idleSprite;
+    }
+
+    private void OnCatPointerPressed(object? sender, PointerPressedEventArgs e)
+    {
+        var properties = e.GetCurrentPoint(_catImage).Properties;
+        if (!properties.IsLeftButtonPressed)
+        {
+            return;
+        }
+
+        _hasRoamTarget = false;
+        EndIdleAction();
+        StopWalking();
+        _pointerDownScreen = GetGlobalCursorPosition();
+        _windowAtPointerDown = Position;
+        e.Pointer.Capture(_catImage);
+        _pointerCaptured = true;
+        _dragging = false;
+        _doubleClick = e.ClickCount >= 2;
+        e.Handled = true;
+    }
+
+    private void OnCatPointerMoved(object? sender, PointerEventArgs e)
+    {
+        if (!_pointerCaptured || !e.GetCurrentPoint(_catImage).Properties.IsLeftButtonPressed)
+        {
+            return;
+        }
+
+        var current = GetGlobalCursorPosition();
+        var deltaX = current.X - _pointerDownScreen.X;
+        var deltaY = current.Y - _pointerDownScreen.Y;
+        if (!_dragging && Math.Abs(deltaX) + Math.Abs(deltaY) > 5 * RenderScaling)
+        {
+            _dragging = true;
+            HideSpeech();
+        }
+
+        if (_dragging)
+        {
+            Position = new PixelPoint(
+                _windowAtPointerDown.X + deltaX,
+                _windowAtPointerDown.Y + deltaY);
+            ClampToWorkArea();
+        }
+    }
+
+    private void OnCatPointerReleased(object? sender, PointerReleasedEventArgs e)
+    {
+        if (!_pointerCaptured)
+        {
+            return;
+        }
+
+        e.Pointer.Capture(null);
+        _pointerCaptured = false;
+        _followPausedUntil = DateTime.UtcNow.AddSeconds(_dragging ? 5 : 1.8);
+        if (_dragging)
+        {
+            Say("\u597d\u5566\uff0c\u6211\u5c31\u5728\u8fd9\u91cc\uff5e", 2.4);
+        }
+        else if (_doubleClick)
+        {
+            ShowFoodMenu();
+        }
+        else
+        {
+            Pat();
+        }
+        e.Handled = true;
+    }
+
+    private void OnCatPointerWheelChanged(object? sender, PointerWheelEventArgs e)
+    {
+        var scales = _sizeMenuItems.Keys.OrderBy(value => value).ToArray();
+        var current = Width / BaseWidth;
+        var index = Array.FindIndex(scales, value => Math.Abs(value - current) < 0.02);
+        if (index < 0)
+        {
+            index = 1;
+        }
+        index = e.Delta.Y > 0 ? Math.Min(scales.Length - 1, index + 1) : Math.Max(0, index - 1);
+        SetPetSize(scales[index]);
+        e.Handled = true;
+    }
+
+    private void Pat()
+    {
+        var messages = new[] { "\u547c\u565c\u547c\u565c\uff5e", "\u518d\u6478\u4e00\u4e0b\uff01", "\u55b5\u545c\uff5e", "\u4eca\u5929\u4e5f\u8981\u5f00\u5fc3\u5594\uff01", "\u6211\u5728\u966a\u4f60\u3002" };
+        StartInteractionAnimation(IdleActionState.Petting, _pettingSprites, 1.25);
+        React(1.04);
+        Say(messages[_random.Next(messages.Length)]);
+    }
+
+    private void BeginFeeding(FoodKind food)
+    {
+        var now = DateTime.UtcNow;
+        while (_recentFeedings.Count > 0 && (now - _recentFeedings.Peek()).TotalSeconds > 55)
+        {
+            _recentFeedings.Dequeue();
+        }
+
+        if (_recentFeedings.Count >= 3)
+        {
+            var fullMessages = new[]
+            {
+                "\u809a\u5b50\u5df2\u7ecf\u5706\u6eda\u6eda\u5566\uff0c\u7b49\u4f1a\u513f\u518d\u5403\uff5e",
+                "\u6211\u5403\u9971\u5566\uff0c\u5148\u4f11\u606f\u4e00\u4e0b\u5427\uff01",
+                "\u518d\u5403\u5c31\u8981\u8d70\u4e0d\u52a8\u5566\uff5e"
+            };
+            StartInteractionAnimation(IdleActionState.Petting, _pettingSprites, 1.25);
+            Say(fullMessages[_random.Next(fullMessages.Length)], 3.1);
+            return;
+        }
+
+        _recentFeedings.Enqueue(now);
+        Bitmap[] sprites;
+        string[] messages;
+        switch (food)
+        {
+            case FoodKind.CannedFood:
+                sprites = _cannedFoodFeedingSprites;
+                messages = new[] { "\u7f50\u5934\u597d\u9999\u5440\uff01", "\u5927\u53e3\u5403\u7f50\u7f50\uff5e", "\u8fd9\u4e2a\u5473\u9053\u6211\u559c\u6b22\uff01" };
+                break;
+            case FoodKind.Chicken:
+                sprites = _chickenFeedingSprites;
+                messages = new[] { "\u9e21\u8089\u771f\u597d\u5403\uff01", "\u55f7\u545c\u4e00\u5927\u53e3\uff5e", "\u8c22\u8c22\u4f60\u7684\u9e21\u8089\uff01" };
+                break;
+            default:
+                sprites = _fishFeedingSprites;
+                messages = new[] { "\u5c0f\u9c7c\u5e72\u771f\u9999\uff01", "\u5494\u56bc\u5494\u56bc\uff5e", "\u6700\u559c\u6b22\u5c0f\u9c7c\u5e72\u5566\uff01" };
+                break;
+        }
+
+        StartInteractionAnimation(IdleActionState.Feeding, sprites, 1.4);
+        Say(messages[_random.Next(messages.Length)], 2.8);
+    }
+
+    private void StartInteractionAnimation(IdleActionState state, Bitmap[] sprites, double durationSeconds)
+    {
+        _hasRoamTarget = false;
+        StopWalking();
+        EndIdleAction();
+        _blinkRestoreTimer.Stop();
+        _isBlinking = false;
+        _stepTransform.X = 0;
+        _stepTransform.Y = 0;
+        var now = DateTime.UtcNow;
+        _idleAction = state;
+        _activeInteractionSprites = sprites;
+        _idleActionStarted = now;
+        _idleActionEnds = now.AddSeconds(durationSeconds);
+        _followPausedUntil = now.AddSeconds(durationSeconds + 0.6);
+        _roamRestUntil = now.AddSeconds(durationSeconds + 2);
+        _catImage.Source = sprites[0];
+    }
+
+    private void React(double peakScale = 1.08)
+    {
+        _reactionTimer.Stop();
+        _reactionTransform.ScaleX = peakScale;
+        _reactionTransform.ScaleY = peakScale;
+        _stepTransform.Y = -8;
+        _reactionTimer.Start();
+    }
+
+    private void EndReaction()
+    {
+        _reactionTimer.Stop();
+        _reactionTransform.ScaleX = 1;
+        _reactionTransform.ScaleY = 1;
+        _stepTransform.Y = 0;
+    }
+
+    private void Say(string message, double seconds = 2.3)
+    {
+        _speechTimer.Stop();
+        _speechTimer.Interval = TimeSpan.FromSeconds(seconds);
+        _speechText.Text = message;
+        _speechBubble.Opacity = 1;
+        _speechTimer.Start();
+    }
+
+    private void HideSpeech()
+    {
+        _speechTimer.Stop();
+        _speechBubble.Opacity = 0;
+    }
+
+    private void SetPetSize(double scale)
+    {
+        var oldBottom = Position.Y + PixelHeight;
+        Width = BaseWidth * scale;
+        Height = BaseHeight * scale;
+        Position = new PixelPoint(Position.X, oldBottom - PixelHeight);
+        foreach (var pair in _sizeMenuItems)
+        {
+            pair.Value.IsChecked = Math.Abs(pair.Key - scale) < 0.01;
+        }
+        ClampToWorkArea();
+        Say(scale < 0.9 ? "\u8ff7\u4f60\u6a21\u5f0f\uff01" : scale > 1.1 ? "\u5927\u6a58\u767b\u573a\uff01" : "\u521a\u521a\u597d\uff5e");
+    }
+
+    private void PositionAtBottomRight()
+    {
+        var area = CurrentWorkArea();
+        Position = new PixelPoint(area.Right - PixelWidth - 18, area.Bottom - PixelHeight - 8);
+    }
+
+    private void ClampToWorkArea()
+    {
+        var area = CurrentWorkArea();
+        Position = new PixelPoint(
+            (int)Clamp(Position.X, area.X, Math.Max(area.X, area.Right - PixelWidth)),
+            (int)Clamp(Position.Y, area.Y, Math.Max(area.Y, area.Bottom - PixelHeight)));
+    }
+
+    private PixelRect CurrentWorkArea()
+    {
+        return Screens.ScreenFromWindow(this)?.WorkingArea ??
+               Screens.Primary?.WorkingArea ??
+               new PixelRect(0, 0, 1440, 900);
+    }
+
+    private int PixelWidth => (int)Math.Round(Width * RenderScaling);
+    private int PixelHeight => (int)Math.Round(Height * RenderScaling);
+
+    private void StopAllTimers()
+    {
+        _motionTimer.Stop();
+        _roamTimer.Stop();
+        _blinkTimer.Stop();
+        _blinkRestoreTimer.Stop();
+        _speechTimer.Stop();
+        _idleActionTimer.Stop();
+        _reactionTimer.Stop();
+        _foodMenu.Close();
+    }
+
+    private static PixelPoint GetGlobalCursorPosition()
+    {
+        if (OperatingSystem.IsWindows())
+        {
+            GetCursorPos(out var windowsPoint);
+            return new PixelPoint(windowsPoint.X, windowsPoint.Y);
+        }
+
+        if (OperatingSystem.IsMacOS())
+        {
+            var eventRef = CGEventCreate(IntPtr.Zero);
+            if (eventRef != IntPtr.Zero)
+            {
+                try
+                {
+                    var point = CGEventGetLocation(eventRef);
+                    return new PixelPoint((int)Math.Round(point.X), (int)Math.Round(point.Y));
+                }
+                finally
+                {
+                    CFRelease(eventRef);
+                }
+            }
+        }
+
+        if (OperatingSystem.IsLinux())
+        {
+            var display = XOpenDisplay(IntPtr.Zero);
+            if (display != IntPtr.Zero)
+            {
+                try
+                {
+                    var rootWindow = XDefaultRootWindow(display);
+                    if (XQueryPointer(
+                            display,
+                            rootWindow,
+                            out _,
+                            out _,
+                            out var rootX,
+                            out var rootY,
+                            out _,
+                            out _,
+                            out _) != 0)
+                    {
+                        return new PixelPoint(rootX, rootY);
+                    }
+                }
+                finally
+                {
+                    XCloseDisplay(display);
+                }
+            }
+        }
+
+        return default;
+    }
+
+    private static string GetPlatformLabel()
+    {
+        var architecture = RuntimeInformation.ProcessArchitecture switch
+        {
+            Architecture.Arm64 => "ARM64",
+            Architecture.X64 => "x64",
+            _ => RuntimeInformation.ProcessArchitecture.ToString()
+        };
+
+        if (OperatingSystem.IsMacOS())
+        {
+            return $"macOS {architecture}";
+        }
+
+        if (OperatingSystem.IsLinux())
+        {
+            return $"\u9e92\u9e9f/UOS {architecture}";
+        }
+
+        return architecture;
+    }
+
+    private static double Clamp(double value, double minimum, double maximum)
+    {
+        return Math.Max(minimum, Math.Min(maximum, value));
+    }
+
+    [DllImport("user32.dll")]
+    private static extern bool GetCursorPos(out WindowsPoint point);
+
+    [DllImport("/System/Library/Frameworks/ApplicationServices.framework/ApplicationServices")]
+    private static extern IntPtr CGEventCreate(IntPtr source);
+
+    [DllImport("/System/Library/Frameworks/ApplicationServices.framework/ApplicationServices")]
+    private static extern CoreGraphicsPoint CGEventGetLocation(IntPtr eventRef);
+
+    [DllImport("/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation")]
+    private static extern void CFRelease(IntPtr handle);
+
+    [DllImport("libX11.so.6")]
+    private static extern IntPtr XOpenDisplay(IntPtr displayName);
+
+    [DllImport("libX11.so.6")]
+    private static extern IntPtr XDefaultRootWindow(IntPtr display);
+
+    [DllImport("libX11.so.6")]
+    private static extern int XQueryPointer(
+        IntPtr display,
+        IntPtr window,
+        out IntPtr rootReturn,
+        out IntPtr childReturn,
+        out int rootXReturn,
+        out int rootYReturn,
+        out int windowXReturn,
+        out int windowYReturn,
+        out uint maskReturn);
+
+    [DllImport("libX11.so.6")]
+    private static extern int XCloseDisplay(IntPtr display);
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct WindowsPoint
+    {
+        public int X;
+        public int Y;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct CoreGraphicsPoint
+    {
+        public double X;
+        public double Y;
+    }
+}
+
