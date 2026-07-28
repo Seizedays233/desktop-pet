@@ -6,6 +6,7 @@
 **/package-arm64/
 **/package-arm64-fixed/
 **/package-intel*/
+**/package-trash*/
 **/package-linux/
 **/dmg-builder/
 **/.vs/

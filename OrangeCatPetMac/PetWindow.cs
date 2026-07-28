@@ -19,7 +19,8 @@ internal sealed class PetWindow : Window
         Scratching,
         Sleeping,
         Feeding,
-        Petting
+        Petting,
+        Recycling
     }
 
     private enum FoodKind
@@ -51,6 +52,8 @@ internal sealed class PetWindow : Window
     private readonly Border _speechBubble;
     private readonly TextBlock _speechText;
     private readonly Image _catImage;
+    private readonly Border _recycleItemVisual;
+    private readonly TextBlock _recycleItemLabel;
     private readonly Bitmap _idleSprite;
     private readonly Bitmap _blinkSprite;
     private readonly Bitmap[] _groomSprites;
@@ -67,6 +70,9 @@ internal sealed class PetWindow : Window
     private readonly RotateTransform _lookTransform = new();
     private readonly TranslateTransform _lookOffsetTransform = new();
     private readonly TranslateTransform _stepTransform = new();
+    private readonly ScaleTransform _recycleItemScale = new(1, 1);
+    private readonly RotateTransform _recycleItemRotation = new();
+    private readonly TranslateTransform _recycleItemOffset = new();
     private readonly DispatcherTimer _motionTimer;
     private readonly DispatcherTimer _roamTimer;
     private readonly DispatcherTimer _blinkTimer;
@@ -90,6 +96,7 @@ internal sealed class PetWindow : Window
     private bool _doubleClick;
     private bool _isWalking;
     private bool _isBlinking;
+    private bool _recycleOperationActive;
     private int _walkFrameIndex;
     private double _velocityX;
     private double _velocityY;
@@ -175,11 +182,48 @@ internal sealed class PetWindow : Window
             RenderTransform = transforms,
             Cursor = new Cursor(StandardCursorType.Hand)
         };
-        ToolTip.SetTip(_catImage, "\u5355\u51fb\u629a\u6478 \u00b7 \u53cc\u51fb\u5582\u98df \u00b7 \u62d6\u52a8\u79fb\u52a8 \u00b7 \u53f3\u952e\u83dc\u5355");
+        ToolTip.SetTip(_catImage, "\u5355\u51fb\u629a\u6478 \u00b7 \u53cc\u51fb\u5582\u98df \u00b7 \u62d6\u6587\u4ef6\u7ed9\u6211\u653e\u8fdb\u56de\u6536\u7ad9 \u00b7 \u53f3\u952e\u83dc\u5355");
         Grid.SetRow(_catImage, 1);
+
+        _recycleItemLabel = new TextBlock
+        {
+            Text = "\u6587\u4ef6",
+            FontFamily = new FontFamily("PingFang SC"),
+            FontSize = 13,
+            FontWeight = FontWeight.Bold,
+            Foreground = new SolidColorBrush(Color.FromRgb(74, 105, 132)),
+            HorizontalAlignment = Avalonia.Layout.HorizontalAlignment.Center,
+            VerticalAlignment = Avalonia.Layout.VerticalAlignment.Center
+        };
+
+        var recycleItemTransforms = new TransformGroup();
+        recycleItemTransforms.Children.Add(_recycleItemScale);
+        recycleItemTransforms.Children.Add(_recycleItemRotation);
+        recycleItemTransforms.Children.Add(_recycleItemOffset);
+
+        _recycleItemVisual = new Border
+        {
+            Width = 54,
+            Height = 58,
+            Background = new SolidColorBrush(Color.FromArgb(248, 250, 253, 255)),
+            BorderBrush = new SolidColorBrush(Color.FromRgb(231, 168, 103)),
+            BorderThickness = new Thickness(2),
+            CornerRadius = new CornerRadius(7),
+            Child = _recycleItemLabel,
+            HorizontalAlignment = Avalonia.Layout.HorizontalAlignment.Center,
+            VerticalAlignment = Avalonia.Layout.VerticalAlignment.Top,
+            Margin = new Thickness(0, 7, 0, 0),
+            RenderTransformOrigin = new RelativePoint(0.5, 0.5, RelativeUnit.Relative),
+            RenderTransform = recycleItemTransforms,
+            IsVisible = false,
+            IsHitTestVisible = false
+        };
+        Grid.SetRow(_recycleItemVisual, 1);
+        _recycleItemVisual.SetValue(Panel.ZIndexProperty, 2);
 
         root.Children.Add(_speechBubble);
         root.Children.Add(_catImage);
+        root.Children.Add(_recycleItemVisual);
         Content = root;
 
         _followMouseMenuItem = CreateCheckMenuItem("\u8ddf\u968f\u9f20\u6807", false);
@@ -225,6 +269,11 @@ internal sealed class PetWindow : Window
         _catImage.PointerMoved += OnCatPointerMoved;
         _catImage.PointerReleased += OnCatPointerReleased;
         _catImage.PointerWheelChanged += OnCatPointerWheelChanged;
+        DragDrop.SetAllowDrop(_catImage, true);
+        DragDrop.AddDragEnterHandler(_catImage, OnCatDragEnter);
+        DragDrop.AddDragOverHandler(_catImage, OnCatDragOver);
+        DragDrop.AddDragLeaveHandler(_catImage, OnCatDragLeave);
+        DragDrop.AddDropHandler(_catImage, OnCatDrop);
 
         _motionTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(33) };
         _motionTimer.Tick += (_, _) => UpdateMotion();
@@ -346,7 +395,7 @@ internal sealed class PetWindow : Window
 
     private void ShowFoodMenu()
     {
-        if (_idleAction == IdleActionState.Feeding)
+        if (_idleAction == IdleActionState.Feeding || _recycleOperationActive)
         {
             return;
         }
@@ -369,7 +418,7 @@ internal sealed class PetWindow : Window
         introTimer.Tick += (_, _) =>
         {
             introTimer.Stop();
-            Say("\u95f2\u7740\u4f1a\u8214\u6bdb\u3001\u6320\u75d2\u548c\u7761\u89c9\uff1b\u53f3\u952e\u53ef\u5f00\u542f\u8d70\u8d70\u505c\u505c\uff5e", 5.2);
+            Say("\u95f2\u7740\u4f1a\u8214\u6bdb\u3001\u6320\u75d2\u548c\u7761\u89c9\uff1b\u62d6\u6587\u4ef6\u7ed9\u6211\u53ef\u4ee5\u653e\u8fdb\u56de\u6536\u7ad9\uff5e", 5.2);
         };
         introTimer.Start();
     }
@@ -390,7 +439,10 @@ internal sealed class PetWindow : Window
 
     private void UpdateMotion()
     {
-        if (_pointerCaptured || _foodMenu.IsOpen || _catImage.ContextMenu?.IsOpen == true)
+        if (_pointerCaptured ||
+            _recycleOperationActive ||
+            _foodMenu.IsOpen ||
+            _catImage.ContextMenu?.IsOpen == true)
         {
             StopWalking();
             RelaxLook();
@@ -664,6 +716,13 @@ internal sealed class PetWindow : Window
                     SetAnimationFrame(_activeInteractionSprites, elapsedSeconds, 7.5, false, false);
                 }
                 break;
+            case IdleActionState.Recycling:
+                if (_activeInteractionSprites != null)
+                {
+                    SetAnimationFrame(_activeInteractionSprites, elapsedSeconds, 7.5, false, false);
+                }
+                UpdateRecycleItemAnimation(elapsedSeconds);
+                break;
             case IdleActionState.Petting:
                 if (_activeInteractionSprites != null)
                 {
@@ -736,6 +795,7 @@ internal sealed class PetWindow : Window
             return;
         }
 
+        var endedAction = _idleAction;
         _idleAction = IdleActionState.None;
         _activeInteractionSprites = null;
         _idleActionStarted = DateTime.MinValue;
@@ -748,6 +808,10 @@ internal sealed class PetWindow : Window
         if (!_isWalking)
         {
             _catImage.Source = _idleSprite;
+        }
+        if (endedAction == IdleActionState.Recycling)
+        {
+            HideRecycleItemVisual();
         }
         ScheduleNextIdleAction(7, 16);
     }
@@ -777,7 +841,7 @@ internal sealed class PetWindow : Window
     private void OnCatPointerPressed(object? sender, PointerPressedEventArgs e)
     {
         var properties = e.GetCurrentPoint(_catImage).Properties;
-        if (!properties.IsLeftButtonPressed)
+        if (!properties.IsLeftButtonPressed || _recycleOperationActive)
         {
             return;
         }
@@ -858,8 +922,155 @@ internal sealed class PetWindow : Window
         e.Handled = true;
     }
 
-    private void Pat()
+    private void OnCatDragEnter(object? sender, DragEventArgs e)
     {
+        var paths = GetDroppedPaths(e.DataTransfer);
+        if (_recycleOperationActive || paths.Length == 0)
+        {
+            e.DragEffects = DragDropEffects.None;
+            e.Handled = true;
+            return;
+        }
+
+        e.DragEffects = DragDropEffects.Move;
+        ShowRecycleItemVisual(paths);
+        Say("\u677e\u5f00\u540e\uff0c\u6211\u4f1a\u628a\u5b83\u653e\u8fdb\u56de\u6536\u7ad9\uff5e", 2.2);
+        e.Handled = true;
+    }
+
+    private void OnCatDragOver(object? sender, DragEventArgs e)
+    {
+        e.DragEffects = !_recycleOperationActive && GetDroppedPaths(e.DataTransfer).Length > 0
+            ? DragDropEffects.Move
+            : DragDropEffects.None;
+        e.Handled = true;
+    }
+
+    private void OnCatDragLeave(object? sender, DragEventArgs e)
+    {
+        if (!_recycleOperationActive)
+        {
+            HideRecycleItemVisual();
+            HideSpeech();
+        }
+        e.Handled = true;
+    }
+
+    private async void OnCatDrop(object? sender, DragEventArgs e)
+    {
+        var paths = GetDroppedPaths(e.DataTransfer);
+        e.Handled = true;
+
+        if (_recycleOperationActive || paths.Length == 0)
+        {
+            e.DragEffects = DragDropEffects.None;
+            HideRecycleItemVisual();
+            Say("\u8fd9\u4e2a\u4e0d\u80fd\u653e\u8fdb\u56de\u6536\u7ad9\u3002", 2.2);
+            return;
+        }
+
+        e.DragEffects = DragDropEffects.Move;
+        _recycleOperationActive = true;
+        _hasRoamTarget = false;
+        StopWalking();
+        StartInteractionAnimation(IdleActionState.Recycling, _fishFeedingSprites, 1.8);
+        ShowRecycleItemVisual(paths);
+        Say(
+            paths.Length == 1
+                ? "\u55f7\u545c\uff01\u4ea4\u7ed9\u6211\u5427\uff5e"
+                : $"\u55f7\u545c\uff01\u8fd9 {paths.Length} \u9879\u4ea4\u7ed9\u6211\uff5e",
+            2.2);
+
+        try
+        {
+            await Task.Delay(700);
+            var result = await Task.Run(() => DesktopTrash.Move(paths));
+            ShowRecycleResult(result);
+        }
+        finally
+        {
+            _recycleOperationActive = false;
+        }
+    }
+
+    private static string[] GetDroppedPaths(IDataTransfer dataTransfer)
+    {
+        var files = dataTransfer.TryGetFiles();
+        if (files is null)
+        {
+            return Array.Empty<string>();
+        }
+
+        return DesktopTrash.GetSupportedPaths(
+            files.Select(file => file.Path.LocalPath));
+    }
+
+    private void ShowRecycleItemVisual(IReadOnlyCollection<string> paths)
+    {
+        var isSingleDirectory = paths.Count == 1 && Directory.Exists(paths.First());
+        _recycleItemLabel.Text = paths.Count > 1
+            ? $"{paths.Count} \u9879"
+            : isSingleDirectory
+                ? "\u6587\u4ef6\u5939"
+                : "\u6587\u4ef6";
+        _recycleItemScale.ScaleX = 1;
+        _recycleItemScale.ScaleY = 1;
+        _recycleItemRotation.Angle = -4;
+        _recycleItemOffset.X = 0;
+        _recycleItemOffset.Y = 0;
+        _recycleItemVisual.Opacity = 1;
+        _recycleItemVisual.IsVisible = true;
+    }
+
+    private void UpdateRecycleItemAnimation(double elapsedSeconds)
+    {
+        var progress = Clamp(elapsedSeconds / 1.25, 0, 1);
+        var easedProgress = 1 - Math.Pow(1 - progress, 3);
+        var scale = 1 - easedProgress * 0.84;
+
+        _recycleItemScale.ScaleX = scale;
+        _recycleItemScale.ScaleY = scale;
+        _recycleItemRotation.Angle = -4 + easedProgress * 16;
+        _recycleItemOffset.X = Math.Sin(progress * Math.PI * 4) * 7 * (1 - progress);
+        _recycleItemOffset.Y = easedProgress * 112;
+        _recycleItemVisual.Opacity = 1 - easedProgress * 0.96;
+    }
+
+    private void HideRecycleItemVisual()
+    {
+        _recycleItemVisual.IsVisible = false;
+        _recycleItemVisual.Opacity = 0;
+    }
+
+    private void ShowRecycleResult(DesktopTrash.MoveResult result)
+    {
+        if (result.SucceededCount > 0 && result.FailedCount == 0)
+        {
+            Say(
+                result.SucceededCount == 1
+                    ? "\u5df2\u7ecf\u653e\u8fdb\u56de\u6536\u7ad9\u5566\uff01"
+                    : $"\u90fd\u653e\u8fdb\u56de\u6536\u7ad9\u5566\uff0c\u5171 {result.SucceededCount} \u9879\uff01",
+                3);
+        }
+        else if (result.SucceededCount > 0)
+        {
+            Say(
+                $"\u653e\u8fdb\u53bb {result.SucceededCount} \u9879\uff0c\u53e6\u6709 {result.FailedCount} \u9879\u5931\u8d25\u4e86\u3002",
+                3.4);
+        }
+        else
+        {
+            Say("\u8fd9\u4e2a\u6211\u5403\u4e0d\u6389\uff0c\u6ca1\u6709\u79fb\u52a8\u4efb\u4f55\u4e1c\u897f\u3002", 3.2);
+        }
+    }
+    private void Pat()
+
+    {
+        if (_recycleOperationActive)
+        {
+            return;
+        }
+
         var messages = new[] { "\u547c\u565c\u547c\u565c\uff5e", "\u518d\u6478\u4e00\u4e0b\uff01", "\u55b5\u545c\uff5e", "\u4eca\u5929\u4e5f\u8981\u5f00\u5fc3\u5594\uff01", "\u6211\u5728\u966a\u4f60\u3002" };
         StartInteractionAnimation(IdleActionState.Petting, _pettingSprites, 1.25);
         React(1.04);
@@ -868,6 +1079,11 @@ internal sealed class PetWindow : Window
 
     private void BeginFeeding(FoodKind food)
     {
+        if (_recycleOperationActive)
+        {
+            return;
+        }
+
         var now = DateTime.UtcNow;
         while (_recentFeedings.Count > 0 && (now - _recentFeedings.Peek()).TotalSeconds > 55)
         {
