@@ -1,4 +1,4 @@
-﻿<Project Sdk="Microsoft.NET.Sdk">
+<Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
     <OutputType>WinExe</OutputType>
     <TargetFramework>net8.0-windows</TargetFramework>
@@ -17,6 +17,9 @@
     <DebugType>none</DebugType>
     <DebugSymbols>false</DebugSymbols>
   </PropertyGroup>
+  <ItemGroup>
+    <Compile Remove="**/*Test.cs" />
+  </ItemGroup>
   <ItemGroup>
     <EmbeddedResource Include="Assets/cat-smooth-idle-v2.png" LogicalName="OrangeCatPet.Assets.cat-smooth-idle-v2.png" />
     <EmbeddedResource Include="Assets/cat-smooth-blink-v2.png" LogicalName="OrangeCatPet.Assets.cat-smooth-blink-v2.png" />

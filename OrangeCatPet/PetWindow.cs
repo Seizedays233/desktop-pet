@@ -1,8 +1,9 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Reflection;
 using System.Runtime.InteropServices;
+using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Controls.Primitives;
@@ -23,7 +24,8 @@ internal sealed class PetWindow : Window
         Scratching,
         Sleeping,
         Feeding,
-        Petting
+        Petting,
+        Recycling
     }
 
     private enum FoodKind
@@ -55,6 +57,8 @@ internal sealed class PetWindow : Window
     private readonly Border _speechBubble;
     private readonly TextBlock _speechText;
     private readonly Image _catImage;
+    private readonly Border _recycleItemVisual;
+    private readonly TextBlock _recycleItemLabel;
     private readonly BitmapSource _idleSprite;
     private readonly BitmapSource _blinkSprite;
     private readonly BitmapSource[] _groomSprites;
@@ -71,6 +75,9 @@ internal sealed class PetWindow : Window
     private readonly RotateTransform _lookTransform = new();
     private readonly TranslateTransform _lookOffsetTransform = new();
     private readonly TranslateTransform _stepTransform = new();
+    private readonly ScaleTransform _recycleItemScale = new(1, 1);
+    private readonly RotateTransform _recycleItemRotation = new();
+    private readonly TranslateTransform _recycleItemOffset = new();
     private readonly DispatcherTimer _motionTimer;
     private readonly DispatcherTimer _roamTimer;
     private readonly DispatcherTimer _blinkTimer;
@@ -93,6 +100,7 @@ internal sealed class PetWindow : Window
     private bool _doubleClick;
     private bool _isWalking;
     private bool _isBlinking;
+    private bool _recycleOperationActive;
     private int _walkFrameIndex;
     private double _velocityX;
     private double _velocityY;
@@ -178,12 +186,49 @@ internal sealed class PetWindow : Window
             RenderTransformOrigin = new Point(0.5, 0.72),
             RenderTransform = transforms,
             Cursor = Cursors.Hand,
-            ToolTip = "会眨眼和走路 · 跟随鼠标 · 单击摸摸 · 双击喂食 · 拖动移动 · 右键菜单"
+            ToolTip = "单击摸摸 · 双击喂食 · 拖文件给我放进回收站 · 右键菜单"
         };
         Grid.SetRow(_catImage, 1);
 
+        _recycleItemLabel = new TextBlock
+        {
+            Text = "文件",
+            FontFamily = new FontFamily("Microsoft YaHei UI"),
+            FontSize = 13,
+            FontWeight = FontWeights.Bold,
+            Foreground = new SolidColorBrush(Color.FromRgb(74, 105, 132)),
+            HorizontalAlignment = HorizontalAlignment.Center,
+            VerticalAlignment = VerticalAlignment.Center
+        };
+
+        var recycleItemTransforms = new TransformGroup();
+        recycleItemTransforms.Children.Add(_recycleItemScale);
+        recycleItemTransforms.Children.Add(_recycleItemRotation);
+        recycleItemTransforms.Children.Add(_recycleItemOffset);
+
+        _recycleItemVisual = new Border
+        {
+            Width = 54,
+            Height = 58,
+            Background = new SolidColorBrush(Color.FromArgb(248, 250, 253, 255)),
+            BorderBrush = new SolidColorBrush(Color.FromRgb(231, 168, 103)),
+            BorderThickness = new Thickness(2),
+            CornerRadius = new CornerRadius(7),
+            Child = _recycleItemLabel,
+            HorizontalAlignment = HorizontalAlignment.Center,
+            VerticalAlignment = VerticalAlignment.Top,
+            Margin = new Thickness(0, 7, 0, 0),
+            RenderTransformOrigin = new Point(0.5, 0.5),
+            RenderTransform = recycleItemTransforms,
+            Visibility = Visibility.Collapsed,
+            IsHitTestVisible = false
+        };
+        Grid.SetRow(_recycleItemVisual, 1);
+        Panel.SetZIndex(_recycleItemVisual, 2);
+
         root.Children.Add(_speechBubble);
         root.Children.Add(_catImage);
+        root.Children.Add(_recycleItemVisual);
         Content = root;
 
         _followMouseMenuItem = new MenuItem
@@ -244,6 +289,11 @@ internal sealed class PetWindow : Window
         _catImage.MouseMove += OnCatMouseMove;
         _catImage.MouseLeftButtonUp += OnCatMouseUp;
         _catImage.MouseWheel += OnCatMouseWheel;
+        _catImage.AllowDrop = true;
+        _catImage.DragEnter += OnCatDragEnter;
+        _catImage.DragOver += OnCatDragOver;
+        _catImage.DragLeave += OnCatDragLeave;
+        _catImage.Drop += OnCatDrop;
 
         _motionTimer = new DispatcherTimer(DispatcherPriority.Render)
         {
@@ -381,7 +431,7 @@ internal sealed class PetWindow : Window
 
     private void ShowFoodMenu()
     {
-        if (_idleAction == IdleActionState.Feeding)
+        if (_idleAction == IdleActionState.Feeding || _recycleOperationActive)
         {
             return;
         }
@@ -432,14 +482,17 @@ internal sealed class PetWindow : Window
         introTimer.Tick += (_, _) =>
         {
             introTimer.Stop();
-            Say("闲着会舔毛、挠痒和睡觉；右键可开启走走停停～", 5.2);
+            Say("闲着会舔毛、挠痒和睡觉；拖文件给我可以放进回收站～", 5.2);
         };
         introTimer.Start();
     }
 
     private void UpdateMotion()
     {
-        if (_pointerCaptured || _foodMenu.IsOpen || (_catImage.ContextMenu != null && _catImage.ContextMenu.IsOpen))
+        if (_pointerCaptured ||
+            _recycleOperationActive ||
+            _foodMenu.IsOpen ||
+            (_catImage.ContextMenu != null && _catImage.ContextMenu.IsOpen))
         {
             StopWalking();
             RelaxLook();
@@ -731,6 +784,13 @@ internal sealed class PetWindow : Window
                     SetAnimationFrame(_activeInteractionSprites, elapsedSeconds, 7.5, false, false);
                 }
                 break;
+            case IdleActionState.Recycling:
+                if (_activeInteractionSprites != null)
+                {
+                    SetAnimationFrame(_activeInteractionSprites, elapsedSeconds, 7.5, false, false);
+                }
+                UpdateRecycleItemAnimation(elapsedSeconds);
+                break;
             case IdleActionState.Petting:
                 if (_activeInteractionSprites != null)
                 {
@@ -804,6 +864,7 @@ internal sealed class PetWindow : Window
             return;
         }
 
+        var endedAction = _idleAction;
         _idleAction = IdleActionState.None;
         _activeInteractionSprites = null;
         _idleActionStarted = DateTime.MinValue;
@@ -818,6 +879,10 @@ internal sealed class PetWindow : Window
         if (!_isWalking)
         {
             _catImage.Source = _idleSprite;
+        }
+        if (endedAction == IdleActionState.Recycling)
+        {
+            HideRecycleItemVisual();
         }
         ScheduleNextIdleAction(7, 16);
     }
@@ -864,7 +929,7 @@ internal sealed class PetWindow : Window
 
     private void OnCatMouseDown(object sender, MouseButtonEventArgs e)
     {
-        if (e.ChangedButton != MouseButton.Left)
+        if (e.ChangedButton != MouseButton.Left || _recycleOperationActive)
         {
             return;
         }
@@ -946,8 +1011,143 @@ internal sealed class PetWindow : Window
         e.Handled = true;
     }
 
+    private void OnCatDragEnter(object sender, DragEventArgs e)
+    {
+        var paths = GetDroppedPaths(e.Data);
+        if (_recycleOperationActive || paths.Length == 0)
+        {
+            e.Effects = DragDropEffects.None;
+            e.Handled = true;
+            return;
+        }
+
+        e.Effects = DragDropEffects.Move;
+        ShowRecycleItemVisual(paths);
+        Say("松开后，我会把它放进回收站～", 2.2);
+        e.Handled = true;
+    }
+
+    private void OnCatDragOver(object sender, DragEventArgs e)
+    {
+        e.Effects = !_recycleOperationActive && GetDroppedPaths(e.Data).Length > 0
+            ? DragDropEffects.Move
+            : DragDropEffects.None;
+        e.Handled = true;
+    }
+
+    private void OnCatDragLeave(object sender, DragEventArgs e)
+    {
+        if (!_recycleOperationActive)
+        {
+            HideRecycleItemVisual();
+            HideSpeech();
+        }
+        e.Handled = true;
+    }
+
+    private async void OnCatDrop(object sender, DragEventArgs e)
+    {
+        var paths = GetDroppedPaths(e.Data);
+        e.Handled = true;
+
+        if (_recycleOperationActive || paths.Length == 0)
+        {
+            e.Effects = DragDropEffects.None;
+            HideRecycleItemVisual();
+            Say("这个不能放进回收站。", 2.2);
+            return;
+        }
+
+        e.Effects = DragDropEffects.Move;
+        _recycleOperationActive = true;
+        _hasRoamTarget = false;
+        StopWalking();
+        StartInteractionAnimation(IdleActionState.Recycling, _fishFeedingSprites, 1.8);
+        ShowRecycleItemVisual(paths);
+        Say(paths.Length == 1 ? "嗷呜！交给我吧～" : $"嗷呜！这 {paths.Length} 项交给我～", 2.2);
+
+        try
+        {
+            await Task.Delay(700);
+            var result = await Task.Run(() => WindowsRecycleBin.Move(paths));
+            ShowRecycleResult(result);
+        }
+        finally
+        {
+            _recycleOperationActive = false;
+        }
+    }
+
+    private static string[] GetDroppedPaths(IDataObject data)
+    {
+        if (!data.GetDataPresent(DataFormats.FileDrop, true) ||
+            data.GetData(DataFormats.FileDrop, true) is not string[] paths)
+        {
+            return Array.Empty<string>();
+        }
+
+        return WindowsRecycleBin.GetSupportedPaths(paths);
+    }
+
+    private void ShowRecycleItemVisual(IReadOnlyCollection<string> paths)
+    {
+        var isSingleDirectory = paths.Count == 1 && System.IO.Directory.Exists(paths.First());
+        _recycleItemLabel.Text = paths.Count > 1 ? $"{paths.Count} 项" : isSingleDirectory ? "文件夹" : "文件";
+        _recycleItemScale.ScaleX = 1;
+        _recycleItemScale.ScaleY = 1;
+        _recycleItemRotation.Angle = -4;
+        _recycleItemOffset.X = 0;
+        _recycleItemOffset.Y = 0;
+        _recycleItemVisual.Opacity = 1;
+        _recycleItemVisual.Visibility = Visibility.Visible;
+    }
+
+    private void UpdateRecycleItemAnimation(double elapsedSeconds)
+    {
+        var progress = Clamp(elapsedSeconds / 1.25, 0, 1);
+        var easedProgress = 1 - Math.Pow(1 - progress, 3);
+        var scale = 1 - easedProgress * 0.84;
+
+        _recycleItemScale.ScaleX = scale;
+        _recycleItemScale.ScaleY = scale;
+        _recycleItemRotation.Angle = -4 + easedProgress * 16;
+        _recycleItemOffset.X = Math.Sin(progress * Math.PI * 4) * 7 * (1 - progress);
+        _recycleItemOffset.Y = easedProgress * 112;
+        _recycleItemVisual.Opacity = 1 - easedProgress * 0.96;
+    }
+
+    private void HideRecycleItemVisual()
+    {
+        _recycleItemVisual.Visibility = Visibility.Collapsed;
+        _recycleItemVisual.Opacity = 0;
+    }
+
+    private void ShowRecycleResult(WindowsRecycleBin.MoveResult result)
+    {
+        if (result.SucceededCount > 0 && result.FailedCount == 0)
+        {
+            Say(
+                result.SucceededCount == 1
+                    ? "已经放进回收站啦！"
+                    : $"都放进回收站啦，共 {result.SucceededCount} 项！",
+                3);
+        }
+        else if (result.SucceededCount > 0)
+        {
+            Say($"放进去 {result.SucceededCount} 项，另有 {result.FailedCount} 项失败了。", 3.4);
+        }
+        else
+        {
+            Say("这个我吃不掉，没有移动任何东西。", 3.2);
+        }
+    }
     private void Pat()
     {
+        if (_recycleOperationActive)
+        {
+            return;
+        }
+
         var messages = new[]
         {
             "呼噜呼噜～",
@@ -963,6 +1163,11 @@ internal sealed class PetWindow : Window
 
     private void BeginFeeding(FoodKind food)
     {
+        if (_recycleOperationActive)
+        {
+            return;
+        }
+
         var now = DateTime.UtcNow;
         while (_recentFeedings.Count > 0 && (now - _recentFeedings.Peek()).TotalSeconds > 55)
         {

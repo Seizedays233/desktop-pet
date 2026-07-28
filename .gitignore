@@ -5,6 +5,7 @@
 **/package/
 **/package-arm64/
 **/package-arm64-fixed/
+**/package-intel*/
 **/package-linux/
 **/dmg-builder/
 **/.vs/
