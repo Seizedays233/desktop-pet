@@ -17,6 +17,12 @@ namespace OrangeCatPet;
 
 internal sealed class PetWindow : Window
 {
+    private enum PetKind
+    {
+        LiJu,
+        Leagle
+    }
+
     private enum IdleActionState
     {
         None,
@@ -40,8 +46,23 @@ internal sealed class PetWindow : Window
     private const double StartFollowingDistance = 155;
     private const double StopFollowingDistance = 105;
     private const int AnimationFrameCount = 8;
+    private const double LeagleScratchFramesPerSecond = 5;
+    private const int LeagleMinimumScratchCycles = 3;
+    private const int LeagleMaximumScratchCyclesExclusive = 5;
 
-    private static readonly string[] GreetingMessages =
+    private static readonly double[] LeagleRollFrameDurationsSeconds =
+    {
+        1.0 / 4.5,
+        1.0 / 4.5,
+        1.0 / 4.5,
+        1.0 / 4.5,
+        0.7,
+        0.7,
+        1.0 / 4.5,
+        1.0 / 4.5
+    };
+
+    private static readonly string[] LiJuGreetingMessages =
     {
         "嗨～今天也要开心呀！",
         "喵！你终于来看我啦～",
@@ -53,22 +74,48 @@ internal sealed class PetWindow : Window
         "喵呜～送你一个好心情！"
     };
 
+    private static readonly string[] LeagleGreetingMessages =
+    {
+        "汪～我来报到！",
+        "我刚才是不是偷偷斜眼看你了？",
+        "要不要陪我玩一会儿？",
+        "我会乖乖守在你旁边。",
+        "忙完记得来摸摸我！",
+        "看到你，尾巴就想摇起来～",
+        "今天也带我一起玩吧！",
+        "送你一个小狗的好心情！"
+    };
+
+    private sealed class PetSpriteSet
+    {
+        public required BitmapSource Idle { get; init; }
+        public required BitmapSource Blink { get; init; }
+        public required BitmapSource[] Groom { get; init; }
+        public required BitmapSource[] Scratch { get; init; }
+        public required BitmapSource[] Sleep { get; init; }
+        public required BitmapSource[] Walk { get; init; }
+        public required BitmapSource[] Pet { get; init; }
+        public required BitmapSource[] FishFeed { get; init; }
+        public required BitmapSource[] CannedFeed { get; init; }
+        public required BitmapSource[] ChickenFeed { get; init; }
+    }
+
     private readonly Random _random = new();
     private readonly Border _speechBubble;
     private readonly TextBlock _speechText;
     private readonly Image _catImage;
     private readonly Border _recycleItemVisual;
     private readonly TextBlock _recycleItemLabel;
-    private readonly BitmapSource _idleSprite;
-    private readonly BitmapSource _blinkSprite;
-    private readonly BitmapSource[] _groomSprites;
-    private readonly BitmapSource[] _scratchSprites;
-    private readonly BitmapSource[] _sleepSprites;
-    private readonly BitmapSource[] _walkingSprites;
-    private readonly BitmapSource[] _pettingSprites;
-    private readonly BitmapSource[] _fishFeedingSprites;
-    private readonly BitmapSource[] _cannedFoodFeedingSprites;
-    private readonly BitmapSource[] _chickenFeedingSprites;
+    private BitmapSource _idleSprite = null!;
+    private BitmapSource _blinkSprite = null!;
+    private BitmapSource[] _groomSprites = null!;
+    private BitmapSource[] _scratchSprites = null!;
+    private BitmapSource[] _sleepSprites = null!;
+    private BitmapSource[] _walkingSprites = null!;
+    private BitmapSource[] _pettingSprites = null!;
+    private BitmapSource[] _fishFeedingSprites = null!;
+    private BitmapSource[] _cannedFoodFeedingSprites = null!;
+    private BitmapSource[] _chickenFeedingSprites = null!;
     private readonly ScaleTransform _facingTransform = new(1, 1);
     private readonly ScaleTransform _breathingTransform = new(1, 1);
     private readonly ScaleTransform _reactionTransform = new(1, 1);
@@ -88,6 +135,8 @@ internal sealed class PetWindow : Window
     private readonly MenuItem _roamMenuItem;
     private readonly MenuItem _topmostMenuItem;
     private readonly ContextMenu _foodMenu;
+    private readonly Dictionary<PetKind, PetSpriteSet> _petSprites = new();
+    private readonly Dictionary<PetKind, MenuItem> _petMenuItems = new();
     private readonly Dictionary<double, MenuItem> _sizeMenuItems = new();
     private readonly Queue<DateTime> _recentFeedings = new();
 
@@ -111,11 +160,12 @@ internal sealed class PetWindow : Window
     private DateTime _idleActionStarted = DateTime.MinValue;
     private DateTime _idleActionEnds = DateTime.MinValue;
     private IdleActionState _idleAction = IdleActionState.None;
+    private PetKind _currentPetKind = PetKind.LiJu;
     private BitmapSource[]? _activeInteractionSprites;
 
     public PetWindow()
     {
-        Title = "橘猫桌宠 · 八帧互动版";
+        Title = "李橘与 Leagle · 八帧互动桌宠";
         Width = BaseWidth;
         Height = BaseHeight;
         AllowsTransparency = true;
@@ -127,16 +177,9 @@ internal sealed class PetWindow : Window
         SnapsToDevicePixels = true;
         UseLayoutRounding = true;
 
-        _idleSprite = LoadSprite("OrangeCatPet.Assets.cat-smooth-idle-v2.png");
-        _blinkSprite = LoadSprite("OrangeCatPet.Assets.cat-smooth-blink-v2.png");
-        _groomSprites = LoadSpriteSequence("smooth-groom");
-        _scratchSprites = LoadSpriteSequence("smooth-scratch-v2");
-        _sleepSprites = LoadSpriteSequence("smooth-sleep-v2");
-        _walkingSprites = LoadSpriteSequence("smooth-walk");
-        _pettingSprites = LoadSpriteSequence("smooth-pat-seated");
-        _fishFeedingSprites = LoadSpriteSequence("smooth-feed");
-        _cannedFoodFeedingSprites = LoadSpriteSequence("smooth-feed-can");
-        _chickenFeedingSprites = LoadSpriteSequence("smooth-feed-chicken");
+        _petSprites[PetKind.LiJu] = LoadLiJuSprites();
+        _petSprites[PetKind.Leagle] = LoadLeagleSprites();
+        ApplyPetSprites(_petSprites[_currentPetKind]);
 
         var root = new Grid();
         root.RowDefinitions.Add(new RowDefinition { Height = new GridLength(78) });
@@ -351,11 +394,60 @@ internal sealed class PetWindow : Window
         return sprite;
     }
 
-    private static BitmapSource[] LoadSpriteSequence(string action)
+    private static BitmapSource[] LoadSpriteSequence(string petPrefix, string action)
     {
         return Enumerable.Range(1, AnimationFrameCount)
-            .Select(index => LoadSprite($"OrangeCatPet.Assets.cat-{action}-{index:00}.png"))
+            .Select(index => LoadSprite($"OrangeCatPet.Assets.{petPrefix}-{action}-{index:00}.png"))
             .ToArray();
+    }
+
+    private static PetSpriteSet LoadLiJuSprites()
+    {
+        return new PetSpriteSet
+        {
+            Idle = LoadSprite("OrangeCatPet.Assets.cat-smooth-idle-v2.png"),
+            Blink = LoadSprite("OrangeCatPet.Assets.cat-smooth-blink-v2.png"),
+            Groom = LoadSpriteSequence("cat", "smooth-groom"),
+            Scratch = LoadSpriteSequence("cat", "smooth-scratch-v2"),
+            Sleep = LoadSpriteSequence("cat", "smooth-sleep-v2"),
+            Walk = LoadSpriteSequence("cat", "smooth-walk"),
+            Pet = LoadSpriteSequence("cat", "smooth-pat-seated"),
+            FishFeed = LoadSpriteSequence("cat", "smooth-feed"),
+            CannedFeed = LoadSpriteSequence("cat", "smooth-feed-can"),
+            ChickenFeed = LoadSpriteSequence("cat", "smooth-feed-chicken")
+        };
+    }
+
+    private static PetSpriteSet LoadLeagleSprites()
+    {
+        var feed = LoadSpriteSequence("dog", "feed");
+        return new PetSpriteSet
+        {
+            Idle = LoadSprite("OrangeCatPet.Assets.dog-idle.png"),
+            Blink = LoadSprite("OrangeCatPet.Assets.dog-blink-04.png"),
+            Groom = LoadSpriteSequence("dog", "roll"),
+            Scratch = LoadSpriteSequence("dog", "scratch"),
+            Sleep = LoadSpriteSequence("dog", "sleep"),
+            Walk = LoadSpriteSequence("dog", "walk"),
+            Pet = LoadSpriteSequence("dog", "pat"),
+            FishFeed = feed,
+            CannedFeed = feed,
+            ChickenFeed = feed
+        };
+    }
+
+    private void ApplyPetSprites(PetSpriteSet sprites)
+    {
+        _idleSprite = sprites.Idle;
+        _blinkSprite = sprites.Blink;
+        _groomSprites = sprites.Groom;
+        _scratchSprites = sprites.Scratch;
+        _sleepSprites = sprites.Sleep;
+        _walkingSprites = sprites.Walk;
+        _pettingSprites = sprites.Pet;
+        _fishFeedingSprites = sprites.FishFeed;
+        _cannedFoodFeedingSprites = sprites.CannedFeed;
+        _chickenFeedingSprites = sprites.ChickenFeed;
     }
 
     private ContextMenu BuildContextMenu()
@@ -369,8 +461,16 @@ internal sealed class PetWindow : Window
         greetItem.Click += (_, _) =>
         {
             React();
-            Say(GreetingMessages[_random.Next(GreetingMessages.Length)]);
+            var greetings = _currentPetKind == PetKind.Leagle
+                ? LeagleGreetingMessages
+                : LiJuGreetingMessages;
+            Say(greetings[_random.Next(greetings.Length)]);
         };
+
+        var petMenu = new MenuItem { Header = "更换宠物" };
+        AddPetItem(petMenu, "橘猫 · 李橘", PetKind.LiJu);
+        AddPetItem(petMenu, "幼年比格犬 · Leagle", PetKind.Leagle);
+        _petMenuItems[_currentPetKind].IsChecked = true;
 
         var feedMenu = new MenuItem { Header = "投喂" };
         AddFoodItems(feedMenu);
@@ -393,6 +493,7 @@ internal sealed class PetWindow : Window
         exitItem.Click += (_, _) => Application.Current.Shutdown();
 
         menu.Items.Add(greetItem);
+        menu.Items.Add(petMenu);
         menu.Items.Add(feedMenu);
         menu.Items.Add(new Separator());
         menu.Items.Add(_followMouseMenuItem);
@@ -403,6 +504,48 @@ internal sealed class PetWindow : Window
         menu.Items.Add(new Separator());
         menu.Items.Add(exitItem);
         return menu;
+    }
+
+    private void AddPetItem(MenuItem parent, string label, PetKind petKind)
+    {
+        var item = new MenuItem
+        {
+            Header = label,
+            IsCheckable = true
+        };
+        item.Click += (_, _) => SwitchPet(petKind);
+        _petMenuItems.Add(petKind, item);
+        parent.Items.Add(item);
+    }
+
+    private void SwitchPet(PetKind petKind)
+    {
+        if (_currentPetKind == petKind)
+        {
+            return;
+        }
+
+        _hasRoamTarget = false;
+        EndIdleAction();
+        StopWalking();
+        _blinkRestoreTimer.Stop();
+        _isBlinking = false;
+
+        _currentPetKind = petKind;
+        ApplyPetSprites(_petSprites[petKind]);
+        _catImage.Source = _idleSprite;
+
+        foreach (var pair in _petMenuItems)
+        {
+            pair.Value.IsChecked = pair.Key == petKind;
+        }
+
+        _followPausedUntil = DateTime.UtcNow.AddSeconds(1.2);
+        _roamRestUntil = DateTime.UtcNow.AddSeconds(2);
+        ScheduleNextIdleAction(4, 8);
+        Say(petKind == PetKind.Leagle
+            ? "汪～我来啦！我可一直在斜眼看你哦。"
+            : "喵～李橘回来啦！");
     }
 
     private ContextMenu BuildFoodMenu()
@@ -417,8 +560,8 @@ internal sealed class PetWindow : Window
 
     private void AddFoodItems(ItemsControl parent)
     {
-        AddFoodItem(parent, "小鱼干", FoodKind.DriedFish);
-        AddFoodItem(parent, "猫罐头", FoodKind.CannedFood);
+        AddFoodItem(parent, "小零食", FoodKind.DriedFish);
+        AddFoodItem(parent, "罐头", FoodKind.CannedFood);
         AddFoodItem(parent, "鸡肉", FoodKind.Chicken);
     }
 
@@ -762,19 +905,46 @@ internal sealed class PetWindow : Window
         switch (_idleAction)
         {
             case IdleActionState.Grooming:
-                SetAnimationFrame(_groomSprites, elapsedSeconds, 7, true, true);
+                if (_currentPetKind == PetKind.Leagle)
+                {
+                    SetTimedAnimationFrame(
+                        _groomSprites,
+                        elapsedSeconds,
+                        LeagleRollFrameDurationsSeconds);
+                }
+                else
+                {
+                    SetAnimationFrame(_groomSprites, elapsedSeconds, 7, true, true);
+                }
                 _stepTransform.X = 0;
                 _stepTransform.Y = 0;
                 _lookTransform.Angle = 0;
                 break;
             case IdleActionState.Scratching:
-                SetAnimationFrame(_scratchSprites, elapsedSeconds, 7, true, false);
+                if (_currentPetKind == PetKind.Leagle)
+                {
+                    SetAnimationFrame(
+                        _scratchSprites,
+                        elapsedSeconds,
+                        LeagleScratchFramesPerSecond,
+                        true,
+                        false);
+                }
+                else
+                {
+                    SetAnimationFrame(_scratchSprites, elapsedSeconds, 7, true, false);
+                }
                 _stepTransform.X = 0;
                 _stepTransform.Y = 0;
                 _lookTransform.Angle = 0;
                 break;
             case IdleActionState.Sleeping:
-                SetAnimationFrame(_sleepSprites, elapsedSeconds, 2.5, true, false);
+                SetAnimationFrame(
+                    _sleepSprites,
+                    elapsedSeconds,
+                    2.5,
+                    _currentPetKind != PetKind.Leagle,
+                    false);
                 _stepTransform.Y = 0;
                 _lookTransform.Angle = 0;
                 break;
@@ -797,6 +967,32 @@ internal sealed class PetWindow : Window
                     SetAnimationFrame(_activeInteractionSprites, elapsedSeconds, 7, false, false);
                 }
                 break;
+        }
+    }
+
+    private void SetTimedAnimationFrame(
+        BitmapSource[] sprites,
+        double elapsedSeconds,
+        double[] frameDurationsSeconds)
+    {
+        var frameCount = Math.Min(sprites.Length, frameDurationsSeconds.Length);
+        var frameIndex = frameCount - 1;
+        var remainingSeconds = elapsedSeconds;
+
+        for (var index = 0; index < frameCount; index++)
+        {
+            if (remainingSeconds < frameDurationsSeconds[index])
+            {
+                frameIndex = index;
+                break;
+            }
+
+            remainingSeconds -= frameDurationsSeconds[index];
+        }
+
+        if (!ReferenceEquals(_catImage.Source, sprites[frameIndex]))
+        {
+            _catImage.Source = sprites[frameIndex];
         }
     }
 
@@ -840,13 +1036,28 @@ internal sealed class PetWindow : Window
         if (selection < 0.44)
         {
             _idleAction = IdleActionState.Grooming;
-            _idleActionEnds = _idleActionStarted.AddSeconds(5 + _random.NextDouble() * 3);
+            _idleActionEnds = _currentPetKind == PetKind.Leagle
+                ? _idleActionStarted.AddSeconds(8 + _random.NextDouble() * 4)
+                : _idleActionStarted.AddSeconds(5 + _random.NextDouble() * 3);
             _catImage.Source = _groomSprites[0];
         }
         else if (selection < 0.74)
         {
             _idleAction = IdleActionState.Scratching;
-            _idleActionEnds = _idleActionStarted.AddSeconds(3.5 + _random.NextDouble() * 2.5);
+            if (_currentPetKind == PetKind.Leagle)
+            {
+                var completeCycles = _random.Next(
+                    LeagleMinimumScratchCycles,
+                    LeagleMaximumScratchCyclesExclusive);
+                var actionDurationSeconds =
+                    completeCycles * _scratchSprites.Length / LeagleScratchFramesPerSecond;
+                _idleActionEnds = _idleActionStarted.AddSeconds(actionDurationSeconds);
+            }
+            else
+            {
+                _idleActionEnds = _idleActionStarted.AddSeconds(
+                    3.5 + _random.NextDouble() * 2.5);
+            }
             _catImage.Source = _scratchSprites[0];
         }
         else
@@ -1064,7 +1275,11 @@ internal sealed class PetWindow : Window
         StopWalking();
         StartInteractionAnimation(IdleActionState.Recycling, _fishFeedingSprites, 1.8);
         ShowRecycleItemVisual(paths);
-        Say(paths.Length == 1 ? "嗷呜！交给我吧～" : $"嗷呜！这 {paths.Length} 项交给我～", 2.2);
+        Say(
+            _currentPetKind == PetKind.Leagle
+                ? paths.Length == 1 ? "嗷呜！我来处理～" : $"嗷呜！这 {paths.Length} 项交给我～"
+                : paths.Length == 1 ? "喵呜！李橘来处理～" : $"喵呜！这 {paths.Length} 项交给李橘～",
+            2.2);
 
         try
         {
@@ -1148,14 +1363,23 @@ internal sealed class PetWindow : Window
             return;
         }
 
-        var messages = new[]
-        {
-            "呼噜呼噜～",
-            "再摸一下！",
-            "喵呜～",
-            "今天也要开心呀！",
-            "我在陪你。"
-        };
+        var messages = _currentPetKind == PetKind.Leagle
+            ? new[]
+            {
+                "再摸摸我的脑袋！",
+                "这里最舒服啦～",
+                "尾巴快要摇起来了！",
+                "我最喜欢这个！",
+                "别停，再摸一下～"
+            }
+            : new[]
+            {
+                "呼噜呼噜～",
+                "再摸一下！",
+                "喵呜～",
+                "今天也要开心呀！",
+                "我在陪你。"
+            };
         StartInteractionAnimation(IdleActionState.Petting, _pettingSprites, 1.25);
         React(1.04);
         Say(messages[_random.Next(messages.Length)]);
@@ -1176,12 +1400,19 @@ internal sealed class PetWindow : Window
 
         if (_recentFeedings.Count >= 3)
         {
-            var fullMessages = new[]
-            {
-                "肚子已经圆滚滚啦，等会儿再吃～",
-                "我吃饱啦，先休息一下吧！",
-                "再吃就要走不动啦～"
-            };
+            var fullMessages = _currentPetKind == PetKind.Leagle
+                ? new[]
+                {
+                    "我的小肚子已经圆滚滚啦！",
+                    "吃饱了，我要趴一会儿～",
+                    "再吃就跑不动啦！"
+                }
+                : new[]
+                {
+                    "肚子已经圆滚滚啦，等会儿再吃～",
+                    "我吃饱啦，先休息一下吧！",
+                    "再吃就要走不动啦～"
+                };
             StartInteractionAnimation(IdleActionState.Petting, _pettingSprites, 1.25);
             Say(fullMessages[_random.Next(fullMessages.Length)], 3.1);
             return;
@@ -1194,15 +1425,21 @@ internal sealed class PetWindow : Window
         {
             case FoodKind.CannedFood:
                 sprites = _cannedFoodFeedingSprites;
-                messages = new[] { "罐头好香呀！", "大口吃罐罐～", "这个味道我喜欢！" };
+                messages = _currentPetKind == PetKind.Leagle
+                    ? new[] { "我闻到罐头啦！", "我要大口吃！", "这个味道我记住了！" }
+                    : new[] { "罐头好香呀！", "大口吃罐罐～", "这个味道我喜欢！" };
                 break;
             case FoodKind.Chicken:
                 sprites = _chickenFeedingSprites;
-                messages = new[] { "鸡肉真好吃！", "嗷呜一大口～", "谢谢你的鸡肉！" };
+                messages = _currentPetKind == PetKind.Leagle
+                    ? new[] { "鸡肉！快给我！", "嗷呜一大口！", "吃完还想去玩～" }
+                    : new[] { "鸡肉真好吃！", "嗷呜一大口～", "谢谢你的鸡肉！" };
                 break;
             default:
                 sprites = _fishFeedingSprites;
-                messages = new[] { "小鱼干真香！", "咔嚓咔嚓～", "最喜欢小鱼干啦！" };
+                messages = _currentPetKind == PetKind.Leagle
+                    ? new[] { "发现小零食！", "咔嚓咔嚓，真香！", "我还想要一块～" }
+                    : new[] { "小鱼干真香！", "咔嚓咔嚓～", "最喜欢小鱼干啦！" };
                 break;
         }
 

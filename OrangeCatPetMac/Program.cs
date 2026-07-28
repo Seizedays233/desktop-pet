@@ -10,7 +10,7 @@ internal static class Program
     [STAThread]
     public static void Main(string[] args)
     {
-        _singleInstanceMutex = new Mutex(true, "LiJuPet.Intel.SingleInstance", out var createdNew);
+        _singleInstanceMutex = new Mutex(true, "LiJuPet.Desktop.SingleInstance", out var createdNew);
         if (!createdNew)
         {
             return;

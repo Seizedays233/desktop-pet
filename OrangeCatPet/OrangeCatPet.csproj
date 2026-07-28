@@ -31,6 +31,8 @@
     <EmbeddedResource Include="Assets/cat-smooth-feed-??.png" LogicalName="OrangeCatPet.Assets.%(Filename)%(Extension)" />
     <EmbeddedResource Include="Assets/cat-smooth-feed-can-??.png" LogicalName="OrangeCatPet.Assets.%(Filename)%(Extension)" />
     <EmbeddedResource Include="Assets/cat-smooth-feed-chicken-??.png" LogicalName="OrangeCatPet.Assets.%(Filename)%(Extension)" />
+    <EmbeddedResource Include="Assets/dog-idle.png" LogicalName="OrangeCatPet.Assets.dog-idle.png" />
+    <EmbeddedResource Include="Assets/dog-*-??.png" LogicalName="OrangeCatPet.Assets.%(Filename)%(Extension)" />
   </ItemGroup>
 </Project>
 

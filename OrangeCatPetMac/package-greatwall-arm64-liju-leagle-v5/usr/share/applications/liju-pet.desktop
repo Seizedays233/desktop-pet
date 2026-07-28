@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=LiJu & Leagle Desktop Pet
+Name[zh_CN]=李橘与 Leagle 桌面宠物
+Comment=Animated cat and beagle desktop pets
+Comment[zh_CN]=支持橘猫和幼年比格犬切换的互动桌面宠物
+Exec=/opt/liju-pet/LiJuPet
+Icon=liju-pet
+Terminal=false
+Categories=Utility;
+StartupNotify=false
