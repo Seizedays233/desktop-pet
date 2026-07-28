@@ -9,6 +9,7 @@
     <AssemblyName>OrangeCatPet</AssemblyName>
     <RootNamespace>OrangeCatPet</RootNamespace>
     <ApplicationIcon>Assets/cat.ico</ApplicationIcon>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
     <RuntimeIdentifier>win-x64</RuntimeIdentifier>
     <SelfContained>true</SelfContained>
     <PublishSingleFile>true</PublishSingleFile>

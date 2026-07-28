@@ -1,0 +1,11 @@
+Package: liju-pet
+Version: 1.3.0
+Section: utils
+Priority: optional
+Architecture: arm64
+Maintainer: Local Build <local@localhost>
+Depends: libc6, libx11-6, libice6, libsm6, libfontconfig1
+Installed-Size: 124500
+Description: LiJu and Leagle animated desktop pets with multi-monitor support
+ A transparent two-pet desktop application with feeding, petting, idle
+ animations, active cursor seeking, multi-monitor roaming, and file trashing.

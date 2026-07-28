@@ -591,17 +591,30 @@ internal sealed class PetWindow : Window
         PixelPoint target = default;
         var hasTarget = false;
         var scale = RenderScaling;
-        var centerOffsetY = (78 + Math.Max(0, Height - 78) * 0.52) * scale;
+        var centerOffsetY = GetVisualCenterOffset(scale);
         var pixelWidth = Width * scale;
         var pixelHeight = Height * scale;
-        var workArea = CurrentWorkArea();
+        var isFollowingCursor =
+            _followMouseMenuItem.IsChecked == true && DateTime.UtcNow >= _followPausedUntil;
 
-        if (_followMouseMenuItem.IsChecked == true && DateTime.UtcNow >= _followPausedUntil)
+        if (isFollowingCursor)
         {
             var cursor = GetGlobalCursorPosition();
+            var cursorScreen = GetScreenAtPoint(cursor);
+            var workArea = cursorScreen.WorkingArea;
+            var targetScale = cursorScreen.Scaling;
+            var targetPixelWidth = Width * targetScale;
+            var targetPixelHeight = Height * targetScale;
+            var targetCenterOffsetY = GetVisualCenterOffset(targetScale);
             target = new PixelPoint(
-                (int)Clamp(cursor.X, workArea.X + pixelWidth / 2, workArea.Right - pixelWidth / 2),
-                (int)Clamp(cursor.Y, workArea.Y + centerOffsetY, workArea.Bottom - pixelHeight + centerOffsetY));
+                (int)Math.Round(Clamp(
+                    cursor.X,
+                    workArea.X + targetPixelWidth / 2,
+                    workArea.Right - targetPixelWidth / 2)),
+                (int)Math.Round(Clamp(
+                    cursor.Y,
+                    workArea.Y + targetCenterOffsetY,
+                    workArea.Bottom - targetPixelHeight + targetCenterOffsetY)));
             hasTarget = true;
         }
         else if (_followMouseMenuItem.IsChecked != true &&
@@ -622,12 +635,14 @@ internal sealed class PetWindow : Window
             return;
         }
 
+        target = RouteTargetAcrossScreens(target, centerOffsetY, pixelWidth, pixelHeight);
+
         var catCenterX = Position.X + pixelWidth / 2;
         var catCenterY = Position.Y + centerOffsetY;
         var deltaX = target.X - catCenterX;
         var deltaY = target.Y - catCenterY;
         var distance = Math.Sqrt(deltaX * deltaX + deltaY * deltaY);
-        UpdateLook(deltaX, deltaY);
+        UpdateLook(deltaX / scale, deltaY / scale);
 
         var movementThreshold = (_isWalking ? StopFollowingDistance : StartFollowingDistance) * scale;
         if (distance <= movementThreshold)
@@ -641,11 +656,16 @@ internal sealed class PetWindow : Window
             return;
         }
 
-        var desiredSpeed = Clamp((distance - StopFollowingDistance * scale) * 0.09, 3.2 * scale, 16.5 * scale);
+        var maximumSpeed = (isFollowingCursor ? 23.0 : 16.5) * scale;
+        var desiredSpeed = Clamp(
+            (distance - StopFollowingDistance * scale) * 0.09,
+            3.2 * scale,
+            maximumSpeed);
         var desiredVelocityX = deltaX / distance * desiredSpeed;
         var desiredVelocityY = deltaY / distance * desiredSpeed;
-        _velocityX += (desiredVelocityX - _velocityX) * 0.18;
-        _velocityY += (desiredVelocityY - _velocityY) * 0.18;
+        var acceleration = isFollowingCursor ? 0.26 : 0.18;
+        _velocityX += (desiredVelocityX - _velocityX) * acceleration;
+        _velocityY += (desiredVelocityY - _velocityY) * acceleration;
 
         var oldPosition = Position;
         Position = new PixelPoint(
@@ -656,11 +676,7 @@ internal sealed class PetWindow : Window
         if (Math.Abs(Position.X - oldPosition.X) + Math.Abs(Position.Y - oldPosition.Y) < 1)
         {
             StopWalking();
-            if (_followMouseMenuItem.IsChecked == true)
-            {
-                _hasRoamTarget = false;
-            }
-            else
+            if (_followMouseMenuItem.IsChecked != true)
             {
                 BeginRoamRest();
             }
@@ -670,7 +686,6 @@ internal sealed class PetWindow : Window
         _facingTransform.ScaleX = deltaX >= 0 ? 1 : -1;
         SetWalkingFrame();
     }
-
     private void Decelerate()
     {
         _velocityX *= 0.68;
@@ -775,36 +790,75 @@ internal sealed class PetWindow : Window
             return;
         }
 
-        var area = CurrentWorkArea();
-        var scale = RenderScaling;
-        var centerOffsetY = (78 + Math.Max(0, Height - 78) * 0.52) * scale;
-        var pixelWidth = Width * scale;
-        var pixelHeight = Height * scale;
-        var catCenterX = Position.X + pixelWidth / 2;
-        var catCenterY = Position.Y + centerOffsetY;
-        var minimumX = area.X + pixelWidth / 2;
-        var maximumX = area.Right - pixelWidth / 2;
-        var minimumY = area.Y + centerOffsetY;
-        var maximumY = area.Bottom - pixelHeight + centerOffsetY;
-
-        var goRight = _random.Next(2) == 0;
-        var availableRoom = goRight ? maximumX - catCenterX : catCenterX - minimumX;
-        var oppositeRoom = goRight ? catCenterX - minimumX : maximumX - catCenterX;
-        if (availableRoom < 180 * scale && oppositeRoom > availableRoom)
+        var screens = Screens.All;
+        if (screens.Count == 0)
         {
-            goRight = !goRight;
-            availableRoom = oppositeRoom;
+            return;
         }
 
-        var travelDistance = Math.Min(availableRoom, (200 + _random.NextDouble() * 320) * scale);
-        var targetX = catCenterX + (goRight ? travelDistance : -travelDistance);
-        var targetY = Clamp(catCenterY + _random.Next(-70, 71) * scale, minimumY, maximumY);
+        var currentScale = RenderScaling;
+        var currentPixelWidth = Width * currentScale;
+        var currentCenterOffsetY = GetVisualCenterOffset(currentScale);
+        var catCenter = new PixelPoint(
+            (int)Math.Round(Position.X + currentPixelWidth / 2),
+            (int)Math.Round(Position.Y + currentCenterOffsetY));
+        var currentScreen = GetScreenAtPoint(catCenter);
+
+        Screen targetScreen;
+        if (screens.Count > 1 && _random.NextDouble() < 0.55)
+        {
+            var otherScreens = screens
+                .Where(screen => !screen.WorkingArea.Equals(currentScreen.WorkingArea))
+                .ToArray();
+            targetScreen = otherScreens.Length > 0
+                ? otherScreens[_random.Next(otherScreens.Length)]
+                : currentScreen;
+        }
+        else
+        {
+            targetScreen = currentScreen;
+        }
+
+        var area = targetScreen.WorkingArea;
+        var targetScale = targetScreen.Scaling;
+        var targetPixelWidth = Width * targetScale;
+        var targetPixelHeight = Height * targetScale;
+        var targetCenterOffsetY = GetVisualCenterOffset(targetScale);
+        var margin = 22 * targetScale;
+        var minimumX = area.X + targetPixelWidth / 2 + margin;
+        var maximumX = area.Right - targetPixelWidth / 2 - margin;
+        var minimumY = area.Y + targetCenterOffsetY + margin;
+        var maximumY = area.Bottom - targetPixelHeight + targetCenterOffsetY - margin;
+
+        if (maximumX < minimumX)
+        {
+            minimumX = maximumX = (area.X + area.Right) / 2.0;
+        }
+        if (maximumY < minimumY)
+        {
+            minimumY = maximumY = (area.Y + area.Bottom) / 2.0;
+        }
+
+        var targetX = (double)catCenter.X;
+        var targetY = (double)catCenter.Y;
+        for (var attempt = 0; attempt < 8; attempt++)
+        {
+            targetX = minimumX + _random.NextDouble() * Math.Max(0, maximumX - minimumX);
+            targetY = minimumY + _random.NextDouble() * Math.Max(0, maximumY - minimumY);
+            var deltaX = targetX - catCenter.X;
+            var deltaY = targetY - catCenter.Y;
+            if (!targetScreen.WorkingArea.Equals(currentScreen.WorkingArea) ||
+                Math.Sqrt(deltaX * deltaX + deltaY * deltaY) >= 180 * currentScale)
+            {
+                break;
+            }
+        }
+
         _roamTarget = new PixelPoint(
-            (int)Clamp(targetX, minimumX, maximumX),
-            (int)targetY);
+            (int)Math.Round(targetX),
+            (int)Math.Round(targetY));
         _hasRoamTarget = true;
     }
-
     private void ScheduleNextIdleAction(double minimumSeconds, double maximumSeconds)
     {
         _nextIdleActionAt = DateTime.UtcNow.AddSeconds(
@@ -1099,7 +1153,7 @@ internal sealed class PetWindow : Window
 
         e.Pointer.Capture(null);
         _pointerCaptured = false;
-        _followPausedUntil = DateTime.UtcNow.AddSeconds(_dragging ? 5 : 1.8);
+        _followPausedUntil = DateTime.UtcNow.AddSeconds(_dragging ? 1.5 : 1.8);
         if (_dragging)
         {
             Say("\u597d\u5566\uff0c\u6211\u5c31\u5728\u8fd9\u91cc\uff5e", 2.4);
@@ -1443,10 +1497,44 @@ internal sealed class PetWindow : Window
 
     private void ClampToWorkArea()
     {
-        var area = CurrentWorkArea();
+        var screens = Screens.All;
+        if (screens.Count == 0)
+        {
+            return;
+        }
+
+        var windowRect = new PixelRect(Position.X, Position.Y, PixelWidth, PixelHeight);
+        var intersectingScreens = screens
+            .Where(screen => RectanglesIntersect(windowRect, screen.Bounds))
+            .ToArray();
+
+        // While the pet overlaps two displays it is crossing the boundary.
+        // Clamping at that point would pull it back to the previous display.
+        if (intersectingScreens.Length >= 2)
+        {
+            return;
+        }
+
+        var targetScreen = intersectingScreens.Length == 1
+            ? intersectingScreens[0]
+            : screens
+                .OrderBy(screen => DistanceSquaredToRectangle(
+                    windowRect.X + windowRect.Width / 2.0,
+                    windowRect.Y + windowRect.Height / 2.0,
+                    screen.WorkingArea))
+                .First();
+        var area = targetScreen.WorkingArea;
+        var targetPixelWidth = Width * targetScreen.Scaling;
+        var targetPixelHeight = Height * targetScreen.Scaling;
         Position = new PixelPoint(
-            (int)Clamp(Position.X, area.X, Math.Max(area.X, area.Right - PixelWidth)),
-            (int)Clamp(Position.Y, area.Y, Math.Max(area.Y, area.Bottom - PixelHeight)));
+            (int)Math.Round(Clamp(
+                Position.X,
+                area.X,
+                Math.Max(area.X, area.Right - targetPixelWidth))),
+            (int)Math.Round(Clamp(
+                Position.Y,
+                area.Y,
+                Math.Max(area.Y, area.Bottom - targetPixelHeight))));
     }
 
     private PixelRect CurrentWorkArea()
@@ -1456,6 +1544,112 @@ internal sealed class PetWindow : Window
                new PixelRect(0, 0, 1440, 900);
     }
 
+    private Screen GetScreenAtPoint(PixelPoint point)
+    {
+        return Screens.ScreenFromPoint(point) ??
+               Screens.ScreenFromWindow(this) ??
+               Screens.Primary ??
+               Screens.All.First();
+    }
+
+    private PixelPoint RouteTargetAcrossScreens(
+        PixelPoint desiredTarget,
+        double currentCenterOffsetY,
+        double currentPixelWidth,
+        double currentPixelHeight)
+    {
+        var currentCenter = new PixelPoint(
+            (int)Math.Round(Position.X + currentPixelWidth / 2),
+            (int)Math.Round(Position.Y + currentCenterOffsetY));
+        var currentScreen = GetScreenAtPoint(currentCenter);
+        var targetScreen = GetScreenAtPoint(desiredTarget);
+        if (currentScreen.WorkingArea.Equals(targetScreen.WorkingArea))
+        {
+            return desiredTarget;
+        }
+
+        var currentArea = currentScreen.WorkingArea;
+        var targetArea = targetScreen.WorkingArea;
+        var targetScale = targetScreen.Scaling;
+        var targetPixelWidth = Width * targetScale;
+        var targetPixelHeight = Height * targetScale;
+        var targetCenterOffsetY = GetVisualCenterOffset(targetScale);
+        var currentHalfWidth = currentPixelWidth / 2.0;
+        var targetHalfWidth = targetPixelWidth / 2.0;
+        var currentMinimumX = currentArea.X + currentHalfWidth;
+        var currentMaximumX = currentArea.Right - currentHalfWidth;
+        var targetMinimumX = targetArea.X + targetHalfWidth;
+        var targetMaximumX = targetArea.Right - targetHalfWidth;
+        var currentMinimumY = currentArea.Y + currentCenterOffsetY;
+        var currentMaximumY = currentArea.Bottom - currentPixelHeight + currentCenterOffsetY;
+        var targetMinimumY = targetArea.Y + targetCenterOffsetY;
+        var targetMaximumY = targetArea.Bottom - targetPixelHeight + targetCenterOffsetY;
+        var sharedMinimumY = Math.Max(currentMinimumY, targetMinimumY);
+        var sharedMaximumY = Math.Min(currentMaximumY, targetMaximumY);
+        var sharedMinimumX = Math.Max(currentMinimumX, targetMinimumX);
+        var sharedMaximumX = Math.Min(currentMaximumX, targetMaximumX);
+
+        if (targetArea.X >= currentArea.Right && sharedMinimumY <= sharedMaximumY)
+        {
+            return new PixelPoint(
+                (int)Math.Round(targetArea.X + targetHalfWidth + 8),
+                (int)Math.Round(Clamp(currentCenter.Y, sharedMinimumY, sharedMaximumY)));
+        }
+
+        if (targetArea.Right <= currentArea.X && sharedMinimumY <= sharedMaximumY)
+        {
+            return new PixelPoint(
+                (int)Math.Round(targetArea.Right - targetHalfWidth - 8),
+                (int)Math.Round(Clamp(currentCenter.Y, sharedMinimumY, sharedMaximumY)));
+        }
+
+        if (targetArea.Y >= currentArea.Bottom && sharedMinimumX <= sharedMaximumX)
+        {
+            return new PixelPoint(
+                (int)Math.Round(Clamp(currentCenter.X, sharedMinimumX, sharedMaximumX)),
+                (int)Math.Round(targetArea.Y + targetCenterOffsetY + 8));
+        }
+
+        if (targetArea.Bottom <= currentArea.Y && sharedMinimumX <= sharedMaximumX)
+        {
+            return new PixelPoint(
+                (int)Math.Round(Clamp(currentCenter.X, sharedMinimumX, sharedMaximumX)),
+                (int)Math.Round(targetArea.Bottom - targetPixelHeight + targetCenterOffsetY - 8));
+        }
+
+        return desiredTarget;
+    }
+
+    private double GetVisualCenterOffset(double scale)
+    {
+        return (78 + Math.Max(0, Height - 78) * 0.52) * scale;
+    }
+
+    private static bool RectanglesIntersect(PixelRect first, PixelRect second)
+    {
+        return first.X < second.Right &&
+               first.Right > second.X &&
+               first.Y < second.Bottom &&
+               first.Bottom > second.Y;
+    }
+
+    private static double DistanceSquaredToRectangle(
+        double x,
+        double y,
+        PixelRect rectangle)
+    {
+        var deltaX = x < rectangle.X
+            ? rectangle.X - x
+            : x > rectangle.Right
+                ? x - rectangle.Right
+                : 0;
+        var deltaY = y < rectangle.Y
+            ? rectangle.Y - y
+            : y > rectangle.Bottom
+                ? y - rectangle.Bottom
+                : 0;
+        return deltaX * deltaX + deltaY * deltaY;
+    }
     private int PixelWidth => (int)Math.Round(Width * RenderScaling);
     private int PixelHeight => (int)Math.Round(Height * RenderScaling);
 

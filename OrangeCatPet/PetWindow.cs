@@ -8,6 +8,7 @@ using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Controls.Primitives;
 using System.Windows.Input;
+using System.Windows.Interop;
 using System.Windows.Media;
 using System.Windows.Media.Animation;
 using System.Windows.Media.Imaging;
@@ -49,6 +50,15 @@ internal sealed class PetWindow : Window
     private const double LeagleScratchFramesPerSecond = 5;
     private const int LeagleMinimumScratchCycles = 3;
     private const int LeagleMaximumScratchCyclesExclusive = 5;
+    private const uint MonitorDefaultToNearest = 2;
+    private const uint SwpNoSize = 0x0001;
+    private const uint SwpNoZOrder = 0x0004;
+    private const uint SwpNoActivate = 0x0010;
+    private const uint PrimaryMonitorFlag = 0x00000001;
+    private const int SmXVirtualScreen = 76;
+    private const int SmYVirtualScreen = 77;
+    private const int SmCxVirtualScreen = 78;
+    private const int SmCyVirtualScreen = 79;
 
     private static readonly double[] LeagleRollFrameDurationsSeconds =
     {
@@ -85,6 +95,11 @@ internal sealed class PetWindow : Window
         "今天也带我一起玩吧！",
         "送你一个小狗的好心情！"
     };
+
+    private readonly record struct MonitorWorkArea(
+        NativeRect MonitorArea,
+        NativeRect WorkArea,
+        bool IsPrimary);
 
     private sealed class PetSpriteSet
     {
@@ -642,34 +657,32 @@ internal sealed class PetWindow : Window
             return;
         }
 
-        Point target;
+        var windowRect = GetWindowRectInPixels();
+        var dpiScale = GetWindowDpiScale();
+        var visualCenterY = GetVisualCenterOffsetInPixels(windowRect, dpiScale);
+        var target = new Point();
         var hasTarget = false;
+        var isFollowingCursor =
+            _followMouseMenuItem.IsChecked && DateTime.UtcNow >= _followPausedUntil;
 
-        if (_followMouseMenuItem.IsChecked && DateTime.UtcNow >= _followPausedUntil)
+        if (isFollowingCursor && GetCursorPos(out var cursor))
         {
-            NativePoint cursor;
-            if (GetCursorPos(out cursor))
-            {
-                var area = SystemParameters.WorkArea;
-                var visualCenterY = 78 + Math.Max(0, ActualHeight - 78) * 0.52;
-                target = new Point(
-                    Clamp(cursor.X, area.Left + ActualWidth / 2, area.Right - ActualWidth / 2),
-                    Clamp(cursor.Y, area.Top + visualCenterY, area.Bottom - ActualHeight + visualCenterY));
-                hasTarget = true;
-            }
-            else
-            {
-                target = new Point();
-            }
+            var cursorArea = GetMonitorWorkAreaAtPoint(cursor).WorkArea;
+            target = new Point(
+                Clamp(
+                    cursor.X,
+                    cursorArea.Left + windowRect.Width / 2.0,
+                    cursorArea.Right - windowRect.Width / 2.0),
+                Clamp(
+                    cursor.Y,
+                    cursorArea.Top + visualCenterY,
+                    cursorArea.Bottom - windowRect.Height + visualCenterY));
+            hasTarget = true;
         }
         else if (!_followMouseMenuItem.IsChecked && _roamMenuItem.IsChecked && _hasRoamTarget)
         {
             target = _roamTarget;
             hasTarget = true;
-        }
-        else
-        {
-            target = new Point();
         }
 
         if (!hasTarget)
@@ -682,15 +695,18 @@ internal sealed class PetWindow : Window
             return;
         }
 
-        var catCenterX = Left + ActualWidth / 2;
-        var catCenterY = Top + 78 + Math.Max(0, ActualHeight - 78) * 0.52;
+        target = RouteTargetAcrossMonitors(windowRect, target, visualCenterY);
+
+        var catCenterX = windowRect.Left + windowRect.Width / 2.0;
+        var catCenterY = windowRect.Top + visualCenterY;
         var deltaX = target.X - catCenterX;
         var deltaY = target.Y - catCenterY;
         var distance = Math.Sqrt(deltaX * deltaX + deltaY * deltaY);
 
-        UpdateLook(deltaX, deltaY);
+        UpdateLook(deltaX / dpiScale, deltaY / dpiScale);
 
-        var movementThreshold = _isWalking ? StopFollowingDistance : StartFollowingDistance;
+        var movementThreshold =
+            (_isWalking ? StopFollowingDistance : StartFollowingDistance) * dpiScale;
         if (distance <= movementThreshold)
         {
             var wasWalking = _isWalking;
@@ -702,26 +718,28 @@ internal sealed class PetWindow : Window
             return;
         }
 
-        var desiredSpeed = Clamp((distance - StopFollowingDistance) * 0.09, 3.2, 16.5);
+        var maximumSpeed = (isFollowingCursor ? 23.0 : 16.5) * dpiScale;
+        var desiredSpeed = Clamp(
+            (distance - StopFollowingDistance * dpiScale) * 0.09,
+            3.2 * dpiScale,
+            maximumSpeed);
         var desiredVelocityX = deltaX / distance * desiredSpeed;
         var desiredVelocityY = deltaY / distance * desiredSpeed;
-        _velocityX += (desiredVelocityX - _velocityX) * 0.18;
-        _velocityY += (desiredVelocityY - _velocityY) * 0.18;
+        var acceleration = isFollowingCursor ? 0.26 : 0.18;
+        _velocityX += (desiredVelocityX - _velocityX) * acceleration;
+        _velocityY += (desiredVelocityY - _velocityY) * acceleration;
 
-        var oldLeft = Left;
-        var oldTop = Top;
-        Left += _velocityX;
-        Top += _velocityY;
+        SetWindowPositionInPixels(
+            windowRect.Left + _velocityX,
+            windowRect.Top + _velocityY);
         ClampToWorkArea();
 
-        if (Math.Abs(Left - oldLeft) + Math.Abs(Top - oldTop) < 0.05)
+        var movedRect = GetWindowRectInPixels();
+        if (Math.Abs(movedRect.Left - windowRect.Left) +
+            Math.Abs(movedRect.Top - windowRect.Top) < 0.5)
         {
             StopWalking();
-            if (_followMouseMenuItem.IsChecked)
-            {
-                _hasRoamTarget = false;
-            }
-            else
+            if (!_followMouseMenuItem.IsChecked)
             {
                 BeginRoamRest();
             }
@@ -731,7 +749,6 @@ internal sealed class PetWindow : Window
         _facingTransform.ScaleX = deltaX >= 0 ? 1 : -1;
         SetWalkingFrame();
     }
-
     private void Decelerate()
     {
         _velocityX *= 0.68;
@@ -743,13 +760,15 @@ internal sealed class PetWindow : Window
             return;
         }
 
-        var oldLeft = Left;
-        var oldTop = Top;
-        Left += _velocityX;
-        Top += _velocityY;
+        var windowRect = GetWindowRectInPixels();
+        SetWindowPositionInPixels(
+            windowRect.Left + _velocityX,
+            windowRect.Top + _velocityY);
         ClampToWorkArea();
 
-        if (Math.Abs(Left - oldLeft) + Math.Abs(Top - oldTop) < 0.05)
+        var movedRect = GetWindowRectInPixels();
+        if (Math.Abs(movedRect.Left - windowRect.Left) +
+            Math.Abs(movedRect.Top - windowRect.Top) < 0.5)
         {
             StopWalking();
             return;
@@ -846,31 +865,68 @@ internal sealed class PetWindow : Window
             return;
         }
 
-        var area = SystemParameters.WorkArea;
-        var centerOffsetY = 78 + Math.Max(0, ActualHeight - 78) * 0.52;
-        var catCenterX = Left + ActualWidth / 2;
-        var catCenterY = Top + centerOffsetY;
-        var minimumX = area.Left + ActualWidth / 2;
-        var maximumX = area.Right - ActualWidth / 2;
-        var minimumY = area.Top + centerOffsetY;
-        var maximumY = area.Bottom - ActualHeight + centerOffsetY;
-
-        var goRight = _random.Next(2) == 0;
-        var availableRoom = goRight ? maximumX - catCenterX : catCenterX - minimumX;
-        var oppositeRoom = goRight ? catCenterX - minimumX : maximumX - catCenterX;
-        if (availableRoom < 180 && oppositeRoom > availableRoom)
+        var monitors = GetMonitorWorkAreas();
+        if (monitors.Count == 0)
         {
-            goRight = !goRight;
-            availableRoom = oppositeRoom;
+            return;
         }
 
-        var travelDistance = Math.Min(availableRoom, 200 + _random.NextDouble() * 320);
-        var targetX = catCenterX + (goRight ? travelDistance : -travelDistance);
-        var targetY = Clamp(catCenterY + _random.Next(-70, 71), minimumY, maximumY);
-        _roamTarget = new Point(Clamp(targetX, minimumX, maximumX), targetY);
+        var windowRect = GetWindowRectInPixels();
+        var dpiScale = GetWindowDpiScale();
+        var centerOffsetY = GetVisualCenterOffsetInPixels(windowRect, dpiScale);
+        var catCenter = new Point(
+            windowRect.Left + windowRect.Width / 2.0,
+            windowRect.Top + centerOffsetY);
+        var currentMonitor = GetMonitorWorkAreaAtPoint(
+            new NativePoint((int)Math.Round(catCenter.X), (int)Math.Round(catCenter.Y)));
+
+        MonitorWorkArea targetMonitor;
+        if (monitors.Count > 1 && _random.NextDouble() < 0.55)
+        {
+            var otherMonitors = monitors
+                .Where(monitor => !monitor.WorkArea.Equals(currentMonitor.WorkArea))
+                .ToArray();
+            targetMonitor = otherMonitors.Length > 0
+                ? otherMonitors[_random.Next(otherMonitors.Length)]
+                : currentMonitor;
+        }
+        else
+        {
+            targetMonitor = currentMonitor;
+        }
+
+        var area = targetMonitor.WorkArea;
+        var margin = 22 * dpiScale;
+        var minimumX = area.Left + windowRect.Width / 2.0 + margin;
+        var maximumX = area.Right - windowRect.Width / 2.0 - margin;
+        var minimumY = area.Top + centerOffsetY + margin;
+        var maximumY = area.Bottom - windowRect.Height + centerOffsetY - margin;
+
+        if (maximumX < minimumX)
+        {
+            minimumX = maximumX = (area.Left + area.Right) / 2.0;
+        }
+        if (maximumY < minimumY)
+        {
+            minimumY = maximumY = (area.Top + area.Bottom) / 2.0;
+        }
+
+        var target = catCenter;
+        for (var attempt = 0; attempt < 8; attempt++)
+        {
+            target = new Point(
+                minimumX + _random.NextDouble() * Math.Max(0, maximumX - minimumX),
+                minimumY + _random.NextDouble() * Math.Max(0, maximumY - minimumY));
+            if (!targetMonitor.WorkArea.Equals(currentMonitor.WorkArea) ||
+                (target - catCenter).Length >= 180 * dpiScale)
+            {
+                break;
+            }
+        }
+
+        _roamTarget = target;
         _hasRoamTarget = true;
     }
-
     private void ScheduleNextIdleAction(double minimumSeconds, double maximumSeconds)
     {
         _nextIdleActionAt = DateTime.UtcNow.AddSeconds(
@@ -1120,24 +1176,12 @@ internal sealed class PetWindow : Window
         _catImage.Source = _isWalking ? _walkingSprites[_walkFrameIndex] : _idleSprite;
     }
 
-    private Point GetCursorPositionInDips()
+    private Point GetCursorPositionInPixels()
     {
-        NativePoint cursor;
-        if (!GetCursorPos(out cursor))
-        {
-            return _pointerDownScreen;
-        }
-
-        var screenPoint = new Point(cursor.X, cursor.Y);
-        var presentationSource = PresentationSource.FromVisual(this);
-        if (presentationSource != null && presentationSource.CompositionTarget != null)
-        {
-            return presentationSource.CompositionTarget.TransformFromDevice.Transform(screenPoint);
-        }
-
-        return screenPoint;
+        return GetCursorPos(out var cursor)
+            ? new Point(cursor.X, cursor.Y)
+            : _pointerDownScreen;
     }
-
     private void OnCatMouseDown(object sender, MouseButtonEventArgs e)
     {
         if (e.ChangedButton != MouseButton.Left || _recycleOperationActive)
@@ -1148,14 +1192,14 @@ internal sealed class PetWindow : Window
         _hasRoamTarget = false;
         EndIdleAction();
         StopWalking();
-        _pointerDownScreen = GetCursorPositionInDips();
-        _windowAtPointerDown = new Point(Left, Top);
+        _pointerDownScreen = GetCursorPositionInPixels();
+        var windowRect = GetWindowRectInPixels();
+        _windowAtPointerDown = new Point(windowRect.Left, windowRect.Top);
         _pointerCaptured = _catImage.CaptureMouse();
         _dragging = false;
         _doubleClick = e.ClickCount >= 2;
         e.Handled = true;
     }
-
     private void OnCatMouseMove(object sender, MouseEventArgs e)
     {
         if (!_pointerCaptured || e.LeftButton != MouseButtonState.Pressed)
@@ -1163,11 +1207,12 @@ internal sealed class PetWindow : Window
             return;
         }
 
-        var currentScreen = GetCursorPositionInDips();
+        var currentScreen = GetCursorPositionInPixels();
         var deltaX = currentScreen.X - _pointerDownScreen.X;
         var deltaY = currentScreen.Y - _pointerDownScreen.Y;
 
-        if (!_dragging && Math.Abs(deltaX) + Math.Abs(deltaY) > 5)
+        if (!_dragging &&
+            Math.Abs(deltaX) + Math.Abs(deltaY) > 5 * GetWindowDpiScale())
         {
             _dragging = true;
             HideSpeech();
@@ -1175,12 +1220,12 @@ internal sealed class PetWindow : Window
 
         if (_dragging)
         {
-            Left = _windowAtPointerDown.X + deltaX;
-            Top = _windowAtPointerDown.Y + deltaY;
+            SetWindowPositionInPixels(
+                _windowAtPointerDown.X + deltaX,
+                _windowAtPointerDown.Y + deltaY);
             ClampToWorkArea();
         }
     }
-
     private void OnCatMouseUp(object sender, MouseButtonEventArgs e)
     {
         if (e.ChangedButton != MouseButton.Left || !_pointerCaptured)
@@ -1190,7 +1235,7 @@ internal sealed class PetWindow : Window
 
         _catImage.ReleaseMouseCapture();
         _pointerCaptured = false;
-        _followPausedUntil = DateTime.UtcNow.AddSeconds(_dragging ? 5 : 1.8);
+        _followPausedUntil = DateTime.UtcNow.AddSeconds(_dragging ? 1.5 : 1.8);
 
         if (_dragging)
         {
@@ -1542,31 +1587,377 @@ internal sealed class PetWindow : Window
 
     private void PositionAtBottomRight()
     {
-        var area = SystemParameters.WorkArea;
-        Left = area.Right - Width - 18;
-        Top = area.Bottom - Height - 8;
+        var windowRect = GetWindowRectInPixels();
+        var area = GetPrimaryMonitorWorkArea().WorkArea;
+        SetWindowPositionInPixels(
+            area.Right - windowRect.Width - 18 * GetWindowDpiScale(),
+            area.Bottom - windowRect.Height - 8 * GetWindowDpiScale());
+        ClampToWorkArea();
     }
 
     private void ClampToWorkArea()
     {
-        var area = SystemParameters.WorkArea;
-        Left = Clamp(Left, area.Left, Math.Max(area.Left, area.Right - ActualWidth));
-        Top = Clamp(Top, area.Top, Math.Max(area.Top, area.Bottom - ActualHeight));
+        var windowRect = GetWindowRectInPixels();
+        var monitors = GetMonitorWorkAreas();
+        if (monitors.Count == 0)
+        {
+            return;
+        }
+
+        var intersectingMonitors = monitors
+            .Where(monitor => RectanglesIntersect(windowRect, monitor.MonitorArea))
+            .ToArray();
+
+        // A window that overlaps two work areas is crossing a monitor boundary.
+        // Do not clamp it back to the old monitor while that transition is in progress.
+        if (intersectingMonitors.Length >= 2)
+        {
+            return;
+        }
+
+        var targetArea = intersectingMonitors.Length == 1
+            ? intersectingMonitors[0].WorkArea
+            : monitors
+                .OrderBy(monitor => DistanceSquaredToRectangle(
+                    windowRect.CenterX,
+                    windowRect.CenterY,
+                    monitor.WorkArea))
+                .First()
+                .WorkArea;
+
+        var maximumLeft = Math.Max(targetArea.Left, targetArea.Right - windowRect.Width);
+        var maximumTop = Math.Max(targetArea.Top, targetArea.Bottom - windowRect.Height);
+        var clampedLeft = Clamp(windowRect.Left, targetArea.Left, maximumLeft);
+        var clampedTop = Clamp(windowRect.Top, targetArea.Top, maximumTop);
+
+        if (Math.Abs(clampedLeft - windowRect.Left) >= 0.5 ||
+            Math.Abs(clampedTop - windowRect.Top) >= 0.5)
+        {
+            SetWindowPositionInPixels(clampedLeft, clampedTop);
+        }
     }
 
+    private Point RouteTargetAcrossMonitors(
+        NativeRect windowRect,
+        Point desiredTarget,
+        double visualCenterY)
+    {
+        var currentCenter = new Point(
+            windowRect.Left + windowRect.Width / 2.0,
+            windowRect.Top + visualCenterY);
+        var currentMonitor = GetMonitorWorkAreaAtPoint(
+            new NativePoint(
+                (int)Math.Round(currentCenter.X),
+                (int)Math.Round(currentCenter.Y)));
+        var targetMonitor = GetMonitorWorkAreaAtPoint(
+            new NativePoint(
+                (int)Math.Round(desiredTarget.X),
+                (int)Math.Round(desiredTarget.Y)));
+
+        if (currentMonitor.WorkArea.Equals(targetMonitor.WorkArea))
+        {
+            return desiredTarget;
+        }
+
+        var currentArea = currentMonitor.WorkArea;
+        var targetArea = targetMonitor.WorkArea;
+        var halfWidth = windowRect.Width / 2.0;
+        var currentMinimumX = currentArea.Left + halfWidth;
+        var currentMaximumX = currentArea.Right - halfWidth;
+        var targetMinimumX = targetArea.Left + halfWidth;
+        var targetMaximumX = targetArea.Right - halfWidth;
+        var currentMinimumY = currentArea.Top + visualCenterY;
+        var currentMaximumY = currentArea.Bottom - windowRect.Height + visualCenterY;
+        var targetMinimumY = targetArea.Top + visualCenterY;
+        var targetMaximumY = targetArea.Bottom - windowRect.Height + visualCenterY;
+        var sharedMinimumY = Math.Max(currentMinimumY, targetMinimumY);
+        var sharedMaximumY = Math.Min(currentMaximumY, targetMaximumY);
+        var sharedMinimumX = Math.Max(currentMinimumX, targetMinimumX);
+        var sharedMaximumX = Math.Min(currentMaximumX, targetMaximumX);
+
+        if (targetArea.Left >= currentArea.Right && sharedMinimumY <= sharedMaximumY)
+        {
+            return new Point(
+                targetArea.Left + halfWidth + 8,
+                Clamp(currentCenter.Y, sharedMinimumY, sharedMaximumY));
+        }
+
+        if (targetArea.Right <= currentArea.Left && sharedMinimumY <= sharedMaximumY)
+        {
+            return new Point(
+                targetArea.Right - halfWidth - 8,
+                Clamp(currentCenter.Y, sharedMinimumY, sharedMaximumY));
+        }
+
+        if (targetArea.Top >= currentArea.Bottom && sharedMinimumX <= sharedMaximumX)
+        {
+            return new Point(
+                Clamp(currentCenter.X, sharedMinimumX, sharedMaximumX),
+                targetArea.Top + visualCenterY + 8);
+        }
+
+        if (targetArea.Bottom <= currentArea.Top && sharedMinimumX <= sharedMaximumX)
+        {
+            return new Point(
+                Clamp(currentCenter.X, sharedMinimumX, sharedMaximumX),
+                targetArea.Bottom - windowRect.Height + visualCenterY - 8);
+        }
+
+        return desiredTarget;
+    }
+
+    private NativeRect GetWindowRectInPixels()
+    {
+        var windowHandle = new WindowInteropHelper(this).Handle;
+        if (windowHandle != IntPtr.Zero && GetWindowRect(windowHandle, out var windowRect))
+        {
+            return windowRect;
+        }
+
+        var dpiScale = VisualTreeHelper.GetDpi(this).DpiScaleX;
+        var actualWidth = ActualWidth > 0 ? ActualWidth : Width;
+        var actualHeight = ActualHeight > 0 ? ActualHeight : Height;
+        var left = double.IsNaN(Left) ? 0 : Left;
+        var top = double.IsNaN(Top) ? 0 : Top;
+        return new NativeRect(
+            (int)Math.Round(left * dpiScale),
+            (int)Math.Round(top * dpiScale),
+            (int)Math.Round((left + actualWidth) * dpiScale),
+            (int)Math.Round((top + actualHeight) * dpiScale));
+    }
+
+    private double GetWindowDpiScale()
+    {
+        var windowHandle = new WindowInteropHelper(this).Handle;
+        if (windowHandle != IntPtr.Zero)
+        {
+            var dpi = GetDpiForWindow(windowHandle);
+            if (dpi > 0)
+            {
+                return dpi / 96.0;
+            }
+        }
+
+        return VisualTreeHelper.GetDpi(this).DpiScaleX;
+    }
+
+    private static double GetVisualCenterOffsetInPixels(
+        NativeRect windowRect,
+        double dpiScale)
+    {
+        var speechRowHeight = 78 * dpiScale;
+        return speechRowHeight +
+               Math.Max(0, windowRect.Height - speechRowHeight) * 0.52;
+    }
+
+    private void SetWindowPositionInPixels(double left, double top)
+    {
+        var windowHandle = new WindowInteropHelper(this).Handle;
+        if (windowHandle != IntPtr.Zero)
+        {
+            _ = SetWindowPos(
+                windowHandle,
+                IntPtr.Zero,
+                (int)Math.Round(left),
+                (int)Math.Round(top),
+                0,
+                0,
+                SwpNoSize | SwpNoZOrder | SwpNoActivate);
+            return;
+        }
+
+        var dpiScale = GetWindowDpiScale();
+        Left = left / dpiScale;
+        Top = top / dpiScale;
+    }
+
+    private static IReadOnlyList<MonitorWorkArea> GetMonitorWorkAreas()
+    {
+        var monitors = new List<MonitorWorkArea>();
+        MonitorEnumProc callback = (monitorHandle, _, _, _) =>
+        {
+            if (TryGetMonitorWorkArea(monitorHandle, out var monitor))
+            {
+                monitors.Add(monitor);
+            }
+            return true;
+        };
+
+        _ = EnumDisplayMonitors(IntPtr.Zero, IntPtr.Zero, callback, IntPtr.Zero);
+        return monitors;
+    }
+
+    private static MonitorWorkArea GetMonitorWorkAreaAtPoint(NativePoint point)
+    {
+        var monitorHandle = MonitorFromPoint(point, MonitorDefaultToNearest);
+        if (monitorHandle != IntPtr.Zero &&
+            TryGetMonitorWorkArea(monitorHandle, out var monitor))
+        {
+            return monitor;
+        }
+
+        return GetPrimaryMonitorWorkArea();
+    }
+
+    private static MonitorWorkArea GetPrimaryMonitorWorkArea()
+    {
+        var monitors = GetMonitorWorkAreas();
+        if (monitors.Count > 0)
+        {
+            return monitors.FirstOrDefault(monitor => monitor.IsPrimary, monitors[0]);
+        }
+
+        var virtualScreen = new NativeRect(
+            GetSystemMetrics(SmXVirtualScreen),
+            GetSystemMetrics(SmYVirtualScreen),
+            GetSystemMetrics(SmXVirtualScreen) + GetSystemMetrics(SmCxVirtualScreen),
+            GetSystemMetrics(SmYVirtualScreen) + GetSystemMetrics(SmCyVirtualScreen));
+        return new MonitorWorkArea(virtualScreen, virtualScreen, true);
+    }
+
+    private static bool TryGetMonitorWorkArea(
+        IntPtr monitorHandle,
+        out MonitorWorkArea monitor)
+    {
+        var monitorInfo = new MonitorInfo
+        {
+            Size = (uint)Marshal.SizeOf<MonitorInfo>()
+        };
+        if (GetMonitorInfo(monitorHandle, ref monitorInfo))
+        {
+            monitor = new MonitorWorkArea(
+                monitorInfo.MonitorArea,
+                monitorInfo.WorkArea,
+                (monitorInfo.Flags & PrimaryMonitorFlag) != 0);
+            return true;
+        }
+
+        monitor = default;
+        return false;
+    }
+
+    private static bool RectanglesIntersect(NativeRect left, NativeRect right)
+    {
+        return left.Left < right.Right &&
+               left.Right > right.Left &&
+               left.Top < right.Bottom &&
+               left.Bottom > right.Top;
+    }
+
+    private static double DistanceSquaredToRectangle(
+        double x,
+        double y,
+        NativeRect rectangle)
+    {
+        var deltaX = x < rectangle.Left
+            ? rectangle.Left - x
+            : x > rectangle.Right
+                ? x - rectangle.Right
+                : 0;
+        var deltaY = y < rectangle.Top
+            ? rectangle.Top - y
+            : y > rectangle.Bottom
+                ? y - rectangle.Bottom
+                : 0;
+        return deltaX * deltaX + deltaY * deltaY;
+    }
     private static double Clamp(double value, double minimum, double maximum)
     {
         return Math.Max(minimum, Math.Min(maximum, value));
     }
 
+    private delegate bool MonitorEnumProc(
+        IntPtr monitorHandle,
+        IntPtr monitorDc,
+        IntPtr monitorRectangle,
+        IntPtr data);
+
     [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
     private static extern bool GetCursorPos(out NativePoint point);
+
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool GetWindowRect(IntPtr windowHandle, out NativeRect rectangle);
+
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool SetWindowPos(
+        IntPtr windowHandle,
+        IntPtr insertAfter,
+        int x,
+        int y,
+        int width,
+        int height,
+        uint flags);
+
+    [DllImport("user32.dll")]
+    private static extern uint GetDpiForWindow(IntPtr windowHandle);
+
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool EnumDisplayMonitors(
+        IntPtr deviceContext,
+        IntPtr clipRectangle,
+        MonitorEnumProc callback,
+        IntPtr data);
+
+    [DllImport("user32.dll")]
+    private static extern IntPtr MonitorFromPoint(
+        NativePoint point,
+        uint flags);
+
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool GetMonitorInfo(
+        IntPtr monitorHandle,
+        ref MonitorInfo monitorInfo);
+
+    [DllImport("user32.dll")]
+    private static extern int GetSystemMetrics(int index);
 
     [StructLayout(LayoutKind.Sequential)]
     private struct NativePoint
     {
+        public NativePoint(int x, int y)
+        {
+            X = x;
+            Y = y;
+        }
+
         public int X;
         public int Y;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct NativeRect
+    {
+        public NativeRect(int left, int top, int right, int bottom)
+        {
+            Left = left;
+            Top = top;
+            Right = right;
+            Bottom = bottom;
+        }
+
+        public int Left;
+        public int Top;
+        public int Right;
+        public int Bottom;
+
+        public readonly int Width => Right - Left;
+        public readonly int Height => Bottom - Top;
+        public readonly double CenterX => (Left + Right) / 2.0;
+        public readonly double CenterY => (Top + Bottom) / 2.0;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct MonitorInfo
+    {
+        public uint Size;
+        public NativeRect MonitorArea;
+        public NativeRect WorkArea;
+        public uint Flags;
     }
 }
 

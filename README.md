@@ -14,6 +14,18 @@
 
 macOS 目前提供 `osx-x64` 和 `osx-arm64` 两个独立构建目标，不是单个 Universal Binary。Intel Mac 使用 `osx-x64`；M1、M2、M3、M4 等 Apple Silicon Mac 使用 `osx-arm64`。
 
+## 🌟 多屏移动与主动追踪鼠标
+
+Windows、macOS 和长城/麒麟/UOS Linux 版本均支持多显示器：
+
+- 按住宠物拖动时，可以跨越主屏和副屏，不再被限制在当前显示器内。
+- “跟随鼠标”会持续读取鼠标当前所在位置并主动追赶，而不是只复现鼠标经过的轨迹。
+- 鼠标进入另一块显示器后，宠物会寻找可通过的屏幕边缘并跨屏追赶。
+- “自动散步”可以在多块显示器之间选择目的地；每段散步结束后仍会停下休息，再开始下一段。
+- 每块显示器分别使用自己的工作区域和缩放比例，兼容负坐标排列、不同分辨率、不同 DPI/缩放比例以及不同任务栏位置。
+
+跟随鼠标和自动散步默认仍为关闭状态，可在右键菜单中按需开启。Linux 的全局鼠标定位依赖 X11/XWayland；原生 Wayland 会出于安全策略限制应用读取全局鼠标坐标。
+
 ## 🌟 重点功能：把文件喂给宠物
 
 桌面宠物现在可以作为一个带动画效果的跨平台回收站：
@@ -48,11 +60,11 @@ macOS 目前提供 `osx-x64` 和 `osx-arm64` 两个独立构建目标，不是�
 - 单击抚摸，当前宠物会播放专属享受动画；Leagle 还会摇尾巴
 - 双击打开投喂菜单
 - 支持小零食、罐头和鸡肉三种食物
-- 鼠标拖动宠物到屏幕任意位置
+- 鼠标拖动宠物到任意显示器
 - 鼠标滚轮或右键菜单调整宠物大小
 - 随机眨眼、舔毛/打滚、后腿挠痒和睡觉动画
-- 可选跟随鼠标模式
-- 可选自动散步模式，行走一段距离后会停下休息
+- 可选跟随鼠标模式，会主动寻找鼠标当前位置并支持跨屏追赶
+- 可选自动散步模式，可跨显示器选择目的地，行走一段距离后会停下休息
 - 随机招呼和互动文案
 - 默认关闭跟随鼠标和自动散步
 
@@ -131,7 +143,8 @@ macOS 版本由 `OrangeCatPetMac` Avalonia 项目提供，当前支持：
 - 李橘与 Leagle 切换，以及各自独立的坐姿、眨眼、行走、投喂、睡眠、挠痒、抚摸和舔毛/打滚动画
 - Leagle 的多次完整挠痒、睡下后保持睡姿、抚摸摇尾巴，以及打滚第 5～6 帧延长停留
 - Finder 文件和文件夹拖放；播放进食动画后调用 macOS Foundation 接口移入废纸篓
-- 鼠标拖动、滚轮缩放、跟随鼠标、自动散步、始终置顶和随机台词
+- 鼠标拖动、滚轮缩放、主动跟随鼠标、跨屏自动散步、始终置顶和随机台词
+- 支持多显示器工作区域、负坐标排列以及不同分辨率和缩放比例
 - Intel x64 与 Apple Silicon ARM64 两种构建目标
 
 ## macOS Apple Silicon 构建
@@ -213,6 +226,22 @@ dotnet publish -c Release \
 ```
 
 Linux 版本需要图形桌面提供 X11 或 XWayland。制作兼容旧版麒麟/UOS 的 `.deb` 时，应使用 gzip 等旧版 `dpkg` 支持的压缩格式，避免使用 `control.tar.zst`。
+
+## 本次 v6 多屏版本构建产物
+
+构建文件位于仓库外层的 `outputs` 目录：
+
+```text
+LiJu-Leagle-Intel-macOS-v6-MultiMonitor-signed.app.tar.gz
+LiJu-Leagle-AppleSilicon-macOS-v6-MultiMonitor-signed.app.tar.gz
+LiJu-Leagle-GreatWall-Kylin-linux-arm64-v6-MultiMonitor-compatible.deb
+LiJu-Leagle-GreatWall-Kylin-linux-arm64-v6-MultiMonitor-portable.tar.gz
+```
+
+- Intel Mac 使用 `Intel-macOS` 包。
+- M1、M2、M3、M4（包括 M3 Pro）使用 `AppleSilicon-macOS` 包。
+- ARM64 长城/麒麟/UOS 优先使用 `compatible.deb` 安装包；无法使用系统安装器时，可解压 `portable.tar.gz` 后运行 `LiJuPet`。
+- macOS 包为本地临时签名，不包含 Apple Developer ID 公证。正式分发前仍应在真实 Mac 上执行 Developer ID 签名、公证和 Gatekeeper 验证。
 
 ## 本地调试
 
